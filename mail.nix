@@ -39,6 +39,14 @@ let
   };
 
   accountNames = lib.attrNames mailcfg.accounts;
+
+  # Resolved inbox jump key: explicit `key` if set, else the name's initial.
+  keyOf =
+    name:
+    let
+      k = mailcfg.accounts.${name}.key;
+    in
+    if k != null then k else lib.substring 0 1 name;
 in
 {
   options.programs.arcmac.mail = {
@@ -63,6 +71,16 @@ in
               type = lib.types.bool;
               default = false;
               description = "Exactly one account must set this; it is also the Fcc fallback.";
+            };
+            key = lib.mkOption {
+              type = lib.types.nullOr (lib.types.strMatching "^.$");
+              default = null;
+              example = "p";
+              description = ''
+                Jump key for the account's inbox saved search. null derives
+                the account name's first letter; set explicitly when two
+                accounts share an initial (collisions fail the build).
+              '';
             };
           };
         }
@@ -198,6 +216,14 @@ in
       {
         assertion = lib.length (lib.filter (n: mailcfg.accounts.${n}.primary) accountNames) == 1;
         message = "programs.arcmac.mail.accounts: exactly one account must set primary = true.";
+      }
+      {
+        assertion =
+          let
+            keys = map keyOf accountNames;
+          in
+          lib.length keys == lib.length (lib.unique keys);
+        message = "programs.arcmac.mail.accounts: inbox jump keys collide — set an explicit `key` on the clashing accounts.";
       }
     ];
   };

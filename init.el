@@ -7,8 +7,9 @@
   "Default face font size in PIXELS; per machine via arcmac-local.el.")
 
 (defvar nd/mail-accounts nil
-  "Alist of maildir account (NAME . ADDRESS), primary account first
-\(see mail.nix); set in arcmac-local.el.")
+  "List of mail accounts (NAME ADDRESS KEY), primary account first
+\(see mail.nix); KEY jumps to the inbox saved search.  Set in
+arcmac-local.el.")
 
 (load (expand-file-name "arcmac-local.el"
                         (or (getenv "XDG_CONFIG_HOME") "~/.config"))
@@ -422,13 +423,15 @@ STRING, TABLE, PRED and POINT are the usual `try-completion' args."
   ;; (Doom's notmuch module set this too — not part of the literal port.)
   (setq notmuch-search-oldest-first nil)
 
-  ;; One inbox saved-search per account, jump key = the account's initial.
+  ;; One inbox saved-search per account; the jump key comes with the
+  ;; account entry (nix derives the name's initial unless overridden,
+  ;; and rejects collisions at build time).
   (setq notmuch-saved-searches
         (mapcar (lambda (acct)
-                  (list :name (format "%s/inbox" acct)
-                        :query (format "tag:inbox and path:%s/**" acct)
-                        :key (substring acct 0 1)))
-                (mapcar #'car nd/mail-accounts)))
+                  (list :name (format "%s/inbox" (car acct))
+                        :query (format "tag:inbox and path:%s/**" (car acct))
+                        :key (nth 2 acct)))
+                nd/mail-accounts))
 
   (defun nd/notmuch-account-searches (acct)
     `((:name "inbox"   :query ,(format "tag:inbox and path:%s/**" acct))
@@ -573,7 +576,7 @@ not deleted here and get cleaned up when /tmp is wiped at reboot."
 (with-eval-after-load 'notmuch
   (setq notmuch-fcc-dirs
         (append (mapcar (lambda (acct)
-                          (cons (cdr acct)
+                          (cons (cadr acct)
                                 (format "%s/Sent +sent -inbox -unread" (car acct))))
                         nd/mail-accounts)
                 (when nd/mail-accounts
