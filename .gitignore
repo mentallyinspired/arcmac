@@ -1,1 +1,19 @@
+# Safety net: this checkout IS ~/.config/arcmac (user-emacs-directory),
+# so runtime artifacts must never land in the repo. All litter paths are
+# redirected to ~/.local/state/arcmac in config.org's state section; this
+# catches anything a stale session or a new package still drops here.
+eln-cache/
+auto-save-list/
+transient/
+eshell/
+history
+places.eld
+recentf.eld
+bookmarks.eld
+projects.eld
+tramp
+custom.el
+*.eld
+
+# nix build artifacts
 result

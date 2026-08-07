@@ -2,9 +2,8 @@
 
 Built-ins-first vanilla Emacs 31, packaged as a Nix flake.
 
-- `config/config.org` — literate config, tangled to `init.el` +
-  `early-init.el` (both committed; the `tangle` flake check enforces they
-  stay in sync).
+- `config.org` — literate config, tangled to `init.el` + `early-init.el`
+  (both committed; the `tangle` flake check enforces they stay in sync).
 - `module.nix` — Home Manager module: Emacs 31 pretest (pgtk, prebuilt via
   emacs-overlay) with the few external packages nix provides, `emacs` /
   `emacsclient` wrappers pinned to this config via `--init-directory`, the
@@ -28,7 +27,6 @@ inputs.arcmac.url = "github:mentallyinspired/arcmac";
 
 programs.arcmac = {
   enable = true;
-  checkoutDir = "dev/arcmac"; # clone of this repo, relative to $HOME
   # daemon.target defaults to graphical-session.target (right under niri
   # and other compositors that import the display env into systemd);
   # on WSL / headless machines use default.target:
@@ -36,17 +34,19 @@ programs.arcmac = {
 };
 ```
 
-The config is **not** read from the nix store: `~/.config/arcmac` is an
-out-of-store symlink to `<checkoutDir>/config`, so edits (and tangling)
-apply on the next Emacs start without a rebuild. Clone this repo to
-`checkoutDir` on every machine that enables the module.
+The config is **not** read from the nix store: `~/.config/arcmac` IS a
+clone of this repo, so edits (and tangling) apply on the next Emacs start
+without a rebuild, and are pushed/pulled between machines with plain git.
+The module's activation step clones the repo there on first switch if the
+directory is missing (over SSH — needs a GitHub key; otherwise it prints
+the manual clone command and carries on).
 
 ## Runtime paths
 
 - State (history, bookmarks, undo, backups, …): `~/.local/state/arcmac/`
 - Native-comp cache: `~/.cache/arcmac/eln-cache/`
-- The checkout's `config/.gitignore` catches the few artifacts Emacs still
-  drops next to the config.
+- The repo's `.gitignore` catches the few artifacts Emacs still drops
+  into the config dir itself (`auto-save-list/`, `eshell/`, …).
 
 ## Editing workflow
 

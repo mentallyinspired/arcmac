@@ -51,12 +51,12 @@
             }
             ''
               mkdir work
-              cp "$src/config/config.org" work/
+              cp "$src/config.org" work/
               emacs --batch --quick \
                 --eval "(require 'ob-tangle)" \
                 --eval "(org-babel-tangle-file \"work/config.org\")"
-              diff -u "$src/config/init.el" work/init.el
-              diff -u "$src/config/early-init.el" work/early-init.el
+              diff -u "$src/init.el" work/init.el
+              diff -u "$src/early-init.el" work/early-init.el
               touch "$out"
             '';
 

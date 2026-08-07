@@ -20,7 +20,7 @@ flake check enforces they stay in sync:
 
 #+begin_src sh :tangle no
 emacs --batch --quick --eval "(require 'ob-tangle)" \
-  --eval '(org-babel-tangle-file "config/config.org")'
+  --eval '(org-babel-tangle-file "config.org")'
 #+end_src
 
 * Early init
@@ -49,7 +49,7 @@ frame stripping here, everything else in =init.el=.
 (push '(vertical-scroll-bars) default-frame-alist)
 #+end_src
 
-=user-emacs-directory= is a symlink into this git checkout, so
+=user-emacs-directory= IS this git checkout, so
 native-comp output must be redirected or =eln-cache/= dirt shows up in
 =git status=.
 
@@ -74,7 +74,7 @@ how the nix-provided packages (evil etc.) get activated.
 
 * State files out of the config dir
 
-The config dir is a symlink into the repo; anything Emacs writes at
+The config dir IS the repo checkout; anything Emacs writes at
 runtime goes to XDG state instead.
 
 #+begin_src emacs-lisp

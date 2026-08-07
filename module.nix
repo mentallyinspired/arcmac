@@ -63,18 +63,6 @@ in
   options.programs.arcmac = {
     enable = lib.mkEnableOption "arcmac, a built-ins-first Emacs 31 setup";
 
-    checkoutDir = lib.mkOption {
-      type = lib.types.str;
-      example = "dev/arcmac";
-      description = ''
-        Where this repo is cloned, relative to $HOME. ~/.config/arcmac
-        becomes an out-of-store symlink to the clone's config/ directory, so
-        the config is live-editable without a rebuild. The clone must be
-        writable — Emacs still drops a few runtime artifacts next to the
-        config (auto-save-list/, eshell/); config/.gitignore catches them.
-      '';
-    };
-
     daemon = {
       enable = lib.mkOption {
         type = lib.types.bool;
@@ -144,9 +132,18 @@ in
     # is the fallback.)
     home.sessionVariables.EDITOR = "emacsclient -t";
 
-    # Live-editable config: ~/.config/arcmac -> config/ in the clone.
-    xdg.configFile."arcmac".source =
-      config.lib.file.mkOutOfStoreSymlink "${config.home.homeDirectory}/${cfg.checkoutDir}/config";
+    # ~/.config/arcmac IS a clone of this repo — live-editable, no store
+    # copy, no symlink indirection. Bootstrap it on fresh machines; never
+    # touch an existing one. SSH remote so config edits can be pushed back;
+    # on a machine without a key yet the switch still succeeds and leaves a
+    # manual-clone hint.
+    home.activation.arcmacClone = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+      if [ ! -e "${config.home.homeDirectory}/.config/arcmac" ]; then
+        ${pkgs.git}/bin/git clone git@github.com:mentallyinspired/arcmac.git \
+          "${config.home.homeDirectory}/.config/arcmac" ||
+          echo "arcmac: clone failed (no SSH key?) — run: git clone git@github.com:mentallyinspired/arcmac.git ~/.config/arcmac"
+      fi
+    '';
 
     # GUI client entry: a new frame on the daemon.
     xdg.desktopEntries.emacsclient = {
