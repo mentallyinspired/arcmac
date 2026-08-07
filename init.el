@@ -3,6 +3,9 @@
 
 ;; Declared before the local file loads so its setq wins (defvar only
 ;; sets unbound variables).
+(defvar nd/font-size 16
+  "Default face font size in PIXELS; per machine via arcmac-local.el.")
+
 (defvar nd/mail-accounts nil
   "Alist of maildir account (NAME . ADDRESS), primary account first
 \(see mail.nix); set in arcmac-local.el.")
@@ -63,6 +66,15 @@
 (add-hook 'prog-mode-hook #'display-line-numbers-mode)
 (add-hook 'before-save-hook #'delete-trailing-whitespace)
 
+(when (and (eq system-type 'gnu/linux)
+           (string-match-p "microsoft"
+                           (with-temp-buffer
+                             (insert-file-contents "/proc/version")
+                             (buffer-string))))
+  (setq browse-url-generic-program
+        (or (executable-find "wslview") "explorer.exe")
+        browse-url-browser-function #'browse-url-generic))
+
 ;; Same font-spec form as Doom: an integer :size is PIXELS (16px ≈ 12pt),
 ;; not points — a :height of 160 (16pt) renders ~1/3 larger than Doom did.
 ;;
@@ -75,7 +87,7 @@
     (with-selected-frame (or frame (selected-frame))
       (set-face-attribute 'default nil
                           :font (font-spec :family "FiraCode Nerd Font Mono"
-                                           :size 16
+                                           :size nd/font-size
                                            :weight 'semi-light))
       (set-face-attribute 'variable-pitch nil
                           :family "Overpass Nerd Font"))))

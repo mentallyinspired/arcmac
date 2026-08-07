@@ -35,6 +35,9 @@ programs.arcmac = {
     email = "ada@example.org";
   };
 
+  # Per-machine font size in pixels (default 16 ≈ 12pt):
+  # fontSize = 18;
+
   # daemon.target defaults to graphical-session.target (right under niri
   # and other compositors that import the display env into systemd);
   # on WSL / headless machines use default.target:
