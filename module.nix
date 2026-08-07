@@ -136,8 +136,9 @@ in
     # copy, no symlink indirection. Bootstrap it on fresh machines; never
     # touch an existing one. SSH remote so config edits can be pushed back;
     # on a machine without a key yet the switch still succeeds and leaves a
-    # manual-clone hint.
-    home.activation.arcmacClone = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+    # manual-clone hint. Ordered before reloadSystemd: sd-switch starts the
+    # daemon there, and it must not boot against a missing clone.
+    home.activation.arcmacClone = lib.hm.dag.entryBetween [ "reloadSystemd" ] [ "writeBoundary" ] ''
       if [ ! -e "${config.home.homeDirectory}/.config/arcmac" ]; then
         ${pkgs.git}/bin/git clone git@github.com:mentallyinspired/arcmac.git \
           "${config.home.homeDirectory}/.config/arcmac" ||
