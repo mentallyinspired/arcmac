@@ -1,8 +1,15 @@
 ;;; init.el --- tangled from config.org -*- lexical-binding: t -*-
 ;; Edit config.org, not this file.
 
-(setq user-full-name "Noah Danros"
-      user-mail-address "noah@danros.se")
+;; Declared before the local file loads so its setq wins (defvar only
+;; sets unbound variables).
+(defvar nd/mail-accounts nil
+  "Alist of maildir account (NAME . ADDRESS), primary account first
+\(see mail.nix); set in arcmac-local.el.")
+
+(load (expand-file-name "arcmac-local.el"
+                        (or (getenv "XDG_CONFIG_HOME") "~/.config"))
+      t)
 
 (defvar my/state-dir
   (expand-file-name "arcmac/"
@@ -403,9 +410,13 @@ STRING, TABLE, PRED and POINT are the usual `try-completion' args."
   ;; (Doom's notmuch module set this too — not part of the literal port.)
   (setq notmuch-search-oldest-first nil)
 
+  ;; One inbox saved-search per account, jump key = the account's initial.
   (setq notmuch-saved-searches
-        '((:name "danros/inbox" :query "tag:inbox and path:danros/**" :key "d")
-          (:name "septus/inbox" :query "tag:inbox and path:septus/**" :key "s")))
+        (mapcar (lambda (acct)
+                  (list :name (format "%s/inbox" acct)
+                        :query (format "tag:inbox and path:%s/**" acct)
+                        :key (substring acct 0 1)))
+                (mapcar #'car nd/mail-accounts)))
 
   (defun nd/notmuch-account-searches (acct)
     `((:name "inbox"   :query ,(format "tag:inbox and path:%s/**" acct))
@@ -420,12 +431,13 @@ STRING, TABLE, PRED and POINT are the usual `try-completion' args."
      acct (nd/notmuch-account-searches acct)
      :show-empty-searches t))
   (setq notmuch-hello-sections
-        (list #'notmuch-hello-insert-header
-              (lambda () (nd/notmuch-hello-insert-account "danros"))
-              (lambda () (nd/notmuch-hello-insert-account "septus"))
-              #'notmuch-hello-insert-search
-              #'notmuch-hello-insert-alltags
-              #'notmuch-hello-insert-footer)))
+        (append (list #'notmuch-hello-insert-header)
+                (mapcar (lambda (acct)
+                          (lambda () (nd/notmuch-hello-insert-account acct)))
+                        (mapcar #'car nd/mail-accounts))
+                (list #'notmuch-hello-insert-search
+                      #'notmuch-hello-insert-alltags
+                      #'notmuch-hello-insert-footer))))
 
 (setq shr-use-colors nil)
 
@@ -544,15 +556,23 @@ not deleted here and get cleaned up when /tmp is wiped at reboot."
       mail-envelope-from 'header
       message-sendmail-envelope-from 'header)
 
+;; Fcc: each account files its own Sent; anything else falls back to the
+;; primary (first) account.
 (with-eval-after-load 'notmuch
   (setq notmuch-fcc-dirs
-        '(("noah@danros.se" . "danros/Sent +sent -inbox -unread")
-          ("noah@septus.se" . "septus/Sent +sent -inbox -unread")
-          (".*"             . "danros/Sent +sent -inbox -unread"))))
+        (append (mapcar (lambda (acct)
+                          (cons (cdr acct)
+                                (format "%s/Sent +sent -inbox -unread" (car acct))))
+                        nd/mail-accounts)
+                (when nd/mail-accounts
+                  (list (cons ".*" (format "%s/Sent +sent -inbox -unread"
+                                           (caar nd/mail-accounts))))))))
 
 (defun nd/mail-push-sent ()
-  (when-let ((mbsync (executable-find "mbsync")))
-    (start-process "mbsync-sent" nil mbsync "danros:Sent" "septus:Sent")))
+  (when-let* ((mbsync (executable-find "mbsync")))
+    (apply #'start-process "mbsync-sent" nil mbsync
+           (mapcar (lambda (acct) (format "%s:Sent" (car acct)))
+                   nd/mail-accounts))))
 (add-hook 'message-sent-hook #'nd/mail-push-sent)
 
 (with-eval-after-load 'evil
@@ -851,7 +871,7 @@ cursor is already on a heading) so the TODO retains its context."
   :ensure nil
   :after org
   :config
-  (setq org-download-image-dir "/home/noah/org/assets"
+  (setq org-download-image-dir "~/org/assets"
         org-download-method 'directory
         org-download-heading-lvl nil))
 

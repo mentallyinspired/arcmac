@@ -1,7 +1,7 @@
-# Mail: mbsync + msmtp + notmuch + afew for the two danros.se accounts —
-# moved here from niri-noah's modules/mail.nix so the notmuch UI in
-# config.org works wherever this flake is consumed. Off by default: turning
-# it on needs per-machine secrets, supplied via passwordCommands.
+# Mail: mbsync + msmtp + notmuch + afew — moved here from niri-noah's
+# modules/mail.nix so the notmuch UI in config.org works wherever this
+# flake is consumed. Off by default: turning it on needs per-machine
+# accounts and secrets (nothing personal is hardcoded in this repo).
 {
   config,
   lib,
@@ -9,72 +9,89 @@
   ...
 }:
 let
-  cfg = config.programs.arcmac.mail;
+  cfg = config.programs.arcmac;
+  mailcfg = cfg.mail;
 
-  # Both accounts live on the same server; only address and secret differ.
-  mkAccount =
-    {
-      address,
-      secret,
-      primary ? false,
-    }:
-    {
-      inherit address primary;
-      userName = address;
-      realName = "Noah Danros";
-      imap = {
-        host = "mail.danros.se";
-        port = 993;
-        tls.enable = true;
-      };
-      smtp = {
-        host = "mail.danros.se";
-        port = 465;
-        tls.enable = true;
-      };
-      passwordCommand = cfg.passwordCommands.${secret};
-      mbsync = {
-        enable = true;
-        create = "both";
-        expunge = "both";
-      };
-      msmtp.enable = true;
-      notmuch.enable = true;
+  # All accounts live on the same server; only address and secret differ.
+  mkAccount = name: acct: {
+    inherit (acct) address primary;
+    userName = acct.address;
+    realName = cfg.identity.fullName;
+    imap = {
+      host = mailcfg.server;
+      port = 993;
+      tls.enable = true;
     };
+    smtp = {
+      host = mailcfg.server;
+      port = 465;
+      tls.enable = true;
+    };
+    passwordCommand =
+      mailcfg.passwordCommands.${name} or "cat ${config.home.homeDirectory}/.mail-secrets/${name}";
+    mbsync = {
+      enable = true;
+      create = "both";
+      expunge = "both";
+    };
+    msmtp.enable = true;
+    notmuch.enable = true;
+  };
+
+  accountNames = lib.attrNames mailcfg.accounts;
 in
 {
   options.programs.arcmac.mail = {
     enable = lib.mkEnableOption "the notmuch mail stack (mbsync + msmtp + afew)";
 
+    server = lib.mkOption {
+      type = lib.types.str;
+      example = "mail.example.org";
+      description = "IMAP (993) and SMTP (465) host, TLS on both. All accounts share it.";
+    };
+
+    accounts = lib.mkOption {
+      type = lib.types.attrsOf (
+        lib.types.submodule {
+          options = {
+            address = lib.mkOption {
+              type = lib.types.str;
+              example = "ada@example.org";
+              description = "The account's address (also the IMAP/SMTP user name).";
+            };
+            primary = lib.mkOption {
+              type = lib.types.bool;
+              default = false;
+              description = "Exactly one account must set this; it is also the Fcc fallback.";
+            };
+          };
+        }
+      );
+      default = { };
+      description = ''
+        Mail accounts, keyed by maildir/account name. The account list is
+        also handed to the elisp side (nd/mail-accounts in
+        ~/.config/arcmac-local.el), which builds the notmuch hello
+        sections, saved searches and Fcc routing from it.
+      '';
+    };
+
     passwordCommands = lib.mkOption {
       type = lib.types.attrsOf lib.types.str;
-      default = {
-        danros = "cat ${config.home.homeDirectory}/.mail-secrets/danros";
-        septus = "cat ${config.home.homeDirectory}/.mail-secrets/septus";
-      };
+      default = { };
       description = ''
-        Shell command per account that prints the IMAP/SMTP password.
-        The default reads plain files from ~/.mail-secrets; hosts with a
-        secrets manager override this (e.g. sops-nix's decrypted /run
-        paths on the NixOS machines).
+        Shell command per account name that prints the IMAP/SMTP password.
+        Accounts without an entry fall back to reading
+        ~/.mail-secrets/<name>; hosts with a secrets manager override this
+        (e.g. sops-nix's decrypted /run paths on NixOS machines).
       '';
     };
   };
 
-  config = lib.mkIf cfg.enable {
+  config = lib.mkIf mailcfg.enable {
     accounts.email = {
       maildirBasePath = "Maildir";
-      accounts = {
-        danros = mkAccount {
-          address = "noah@danros.se";
-          secret = "danros";
-          primary = true;
-        };
-        septus = mkAccount {
-          address = "noah@septus.se";
-          secret = "septus";
-        };
-      };
+      accounts = lib.mapAttrs mkAccount mailcfg.accounts;
     };
 
     programs.mbsync.enable = true;
@@ -93,7 +110,7 @@ in
       # trashed on other devices, mbsync's download time serves the same
       # role).
       hooks.preNew = ''
-        for acct in danros septus; do
+        for acct in ${lib.concatStringsSep " " accountNames}; do
           dest="$HOME/Maildir/$acct/Trash/cur"
           ${pkgs.notmuch}/bin/notmuch search --output=files --format=text0 \
             -- "(tag:trash or tag:deleted) and path:$acct/** and not folder:$acct/Trash" |
@@ -176,5 +193,12 @@ in
     # Escape hatch: empty the Trash now instead of waiting out the 30 days.
     # Destructive and unprompted — trashed mail is gone for good after this.
     programs.zsh.shellAliases.mail-empty-trash = "notmuch search --output=files --format=text0 -- \"folder:/Trash/ or tag:trash or tag:deleted\" | xargs -0 -r rm -f && notmuch new && mbsync -a";
+
+    assertions = [
+      {
+        assertion = lib.length (lib.filter (n: mailcfg.accounts.${n}.primary) accountNames) == 1;
+        message = "programs.arcmac.mail.accounts: exactly one account must set primary = true.";
+      }
+    ];
   };
 }

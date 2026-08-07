@@ -27,19 +27,32 @@ inputs.arcmac.url = "github:mentallyinspired/arcmac";
 
 programs.arcmac = {
   enable = true;
+
+  # Identity is NOT hardcoded in the repo — it lands in the generated
+  # ~/.config/arcmac-local.el, which config.org loads at init.
+  identity = {
+    fullName = "Ada Lovelace";
+    email = "ada@example.org";
+  };
+
   # daemon.target defaults to graphical-session.target (right under niri
   # and other compositors that import the display env into systemd);
   # on WSL / headless machines use default.target:
   # daemon.target = "default.target";
 
-  # Optional: the full notmuch mail stack (mbsync + msmtp + afew, the
-  # danros/septus accounts, 5-minute sync timer, trash flow) — see
-  # mail.nix. Off by default; needs per-machine secrets:
+  # Optional: the full notmuch mail stack (mbsync + msmtp + afew,
+  # 5-minute sync timer, trash flow) — see mail.nix. Off by default;
+  # accounts and secrets are per-machine options:
   # mail.enable = true;
-  # mail.passwordCommands = { danros = "cat /run/secrets/mail-danros"; … };
-  # (default reads ~/.mail-secrets/<account>)
+  # mail.server = "mail.example.org";
+  # mail.accounts.personal = { address = "ada@example.org"; primary = true; };
+  # mail.passwordCommands.personal = "cat /run/secrets/mail-personal";
+  # (accounts without an entry read ~/.mail-secrets/<name>)
 };
 ```
+
+Without nix, write `~/.config/arcmac-local.el` by hand — see the Identity
+section at the top of `config.org`.
 
 **Fresh non-NixOS machines:** the `nixConfig` substituter below is a
 restricted setting — nix silently ignores it for non-trusted users, and
