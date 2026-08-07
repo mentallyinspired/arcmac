@@ -31,8 +31,27 @@ programs.arcmac = {
   # and other compositors that import the display env into systemd);
   # on WSL / headless machines use default.target:
   # daemon.target = "default.target";
+
+  # Optional: the full notmuch mail stack (mbsync + msmtp + afew, the
+  # danros/septus accounts, 5-minute sync timer, trash flow) — see
+  # mail.nix. Off by default; needs per-machine secrets:
+  # mail.enable = true;
+  # mail.passwordCommands = { danros = "cat /run/secrets/mail-danros"; … };
+  # (default reads ~/.mail-secrets/<account>)
 };
 ```
+
+**Fresh non-NixOS machines:** the `nixConfig` substituter below is a
+restricted setting — nix silently ignores it for non-trusted users, and
+the first switch then builds the Emacs 31 pretest from source (hours).
+Before the first switch, add to `/etc/nix/nix.conf`:
+
+```
+extra-substituters = https://nix-community.cachix.org
+extra-trusted-public-keys = nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs=
+```
+
+(NixOS consumers should set the same via their system config.)
 
 The config is **not** read from the nix store: `~/.config/arcmac` IS a
 clone of this repo, so edits (and tangling) apply on the next Emacs start

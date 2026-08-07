@@ -60,6 +60,8 @@ let
   '';
 in
 {
+  imports = [ ./mail.nix ];
+
   options.programs.arcmac = {
     enable = lib.mkEnableOption "arcmac, a built-ins-first Emacs 31 setup";
 
@@ -140,9 +142,16 @@ in
     # daemon there, and it must not boot against a missing clone.
     home.activation.arcmacClone = lib.hm.dag.entryBetween [ "reloadSystemd" ] [ "writeBoundary" ] ''
       if [ ! -e "${config.home.homeDirectory}/.config/arcmac" ]; then
-        ${pkgs.git}/bin/git clone git@github.com:mentallyinspired/arcmac.git \
-          "${config.home.homeDirectory}/.config/arcmac" ||
-          echo "arcmac: clone failed (no SSH key?) — run: git clone git@github.com:mentallyinspired/arcmac.git ~/.config/arcmac"
+        # Clone over HTTPS: works keyless on a brand-new machine (the repo
+        # is public); the push URL is flipped to SSH so edits push back
+        # once a key exists.
+        if ${pkgs.git}/bin/git clone https://github.com/mentallyinspired/arcmac.git \
+          "${config.home.homeDirectory}/.config/arcmac"; then
+          ${pkgs.git}/bin/git -C "${config.home.homeDirectory}/.config/arcmac" \
+            remote set-url --push origin git@github.com:mentallyinspired/arcmac.git
+        else
+          echo "arcmac: bootstrap clone failed — run: git clone https://github.com/mentallyinspired/arcmac.git ~/.config/arcmac && systemctl --user restart emacs"
+        fi
       fi
     '';
 

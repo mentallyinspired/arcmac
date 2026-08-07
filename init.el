@@ -322,11 +322,28 @@ STRING, TABLE, PRED and POINT are the usual `try-completion' args."
                  ("\\.\\(zig\\|zon\\)\\'" . zig-ts-mode)))
   (add-to-list 'auto-mode-alist entry))
 
+(defvar nd/eglot-servers
+  '((nix-ts-mode    . "nixd")
+    (go-ts-mode     . "gopls")
+    (rust-ts-mode   . "rust-analyzer")
+    (python-ts-mode . "pyright-langserver")
+    (bash-ts-mode   . "bash-language-server")
+    (js-ts-mode     . "typescript-language-server")
+    (yaml-ts-mode   . "yaml-language-server")
+    (zig-ts-mode    . "zls"))
+  "Language-server binary that must exist for eglot to start per mode.")
+
+(defun nd/eglot-ensure ()
+  "`eglot-ensure', but only when the mode's server is installed."
+  (when-let* ((bin (alist-get major-mode nd/eglot-servers))
+              ((executable-find bin)))
+    (eglot-ensure)))
+
 (use-package eglot
   :ensure nil
   :hook ((nix-ts-mode go-ts-mode rust-ts-mode python-ts-mode
           bash-ts-mode js-ts-mode yaml-ts-mode zig-ts-mode)
-         . eglot-ensure)
+         . nd/eglot-ensure)
   :custom
   (eglot-autoshutdown t)
   :config

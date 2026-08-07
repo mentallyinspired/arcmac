@@ -477,15 +477,35 @@ zig-ts-mode come from nix.
 
 * Eglot (LSP)
 
-All servers are already on PATH from =modules/dev/*=: nixd, gopls,
-rust-analyzer, pyright, zls, bash/typescript/yaml language servers.
+Servers come from the consuming flake (niri-noah's =modules/dev/*=
+ships them all; the WSL box only has bash-language-server). The hook
+therefore checks that the server binary exists before starting eglot —
+machines without one get a plain tree-sitter mode instead of an error
+on every visit.
 
 #+begin_src emacs-lisp
+(defvar nd/eglot-servers
+  '((nix-ts-mode    . "nixd")
+    (go-ts-mode     . "gopls")
+    (rust-ts-mode   . "rust-analyzer")
+    (python-ts-mode . "pyright-langserver")
+    (bash-ts-mode   . "bash-language-server")
+    (js-ts-mode     . "typescript-language-server")
+    (yaml-ts-mode   . "yaml-language-server")
+    (zig-ts-mode    . "zls"))
+  "Language-server binary that must exist for eglot to start per mode.")
+
+(defun nd/eglot-ensure ()
+  "`eglot-ensure', but only when the mode's server is installed."
+  (when-let* ((bin (alist-get major-mode nd/eglot-servers))
+              ((executable-find bin)))
+    (eglot-ensure)))
+
 (use-package eglot
   :ensure nil
   :hook ((nix-ts-mode go-ts-mode rust-ts-mode python-ts-mode
           bash-ts-mode js-ts-mode yaml-ts-mode zig-ts-mode)
-         . eglot-ensure)
+         . nd/eglot-ensure)
   :custom
   (eglot-autoshutdown t)
   :config
@@ -562,8 +582,10 @@ config. =ispell-set-spellchecker-params= must run before
 
 * Mail
 
-Notmuch over the maildirs that =modules/mail.nix= maintains (mbsync +
-msmtp + afew, accounts =danros= and =septus=). The elisp ships with
+Notmuch over the maildirs that =mail.nix= (this repo) maintains —
+enable with =programs.arcmac.mail.enable= + per-host
+=passwordCommands= (mbsync + msmtp + afew, accounts =danros= and
+=septus=). The elisp ships with
 the notmuch CLI itself (=pkgs.notmuch.emacs= in
 =module.nix=), so UI and index can never version-drift.
 Ported from the Doom config; the =set-popup-rule!= forms were dropped —
@@ -707,7 +729,7 @@ not deleted here and get cleaned up when /tmp is wiped at reboot."
 ** Delete, refresh, sync
 
 Delete = tag =+deleted -inbox=; afew moves tagged mail to Trash on the
-next sync (see =modules/mail.nix=). The sync command runs the full
+next sync (see =mail.nix=). The sync command runs the full
 pipeline — fetch, index, push local tag changes back — asynchronously.
 
 #+begin_src emacs-lisp
