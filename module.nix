@@ -156,6 +156,10 @@ in
       nerd-fonts.mononoki
       nerd-fonts.caskaydia-cove
       nerd-fonts.ubuntu
+      # "Symbols Nerd Font Mono" — the family nerd-icons hardcodes as
+      # `nerd-icons-font-family'. Without it every icon (modeline, agenda
+      # categories) renders as whatever fontconfig substitutes.
+      nerd-fonts.symbols-only
 
       # Spell checking
       (hunspell.withDicts (

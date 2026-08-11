@@ -147,7 +147,8 @@ runtime goes to XDG state instead.
 (global-auto-revert-mode 1)
 (column-number-mode 1)
 (global-subword-mode 1)           ; CamelCase word motions
-(display-time-mode 1)
+;; display-time-mode is enabled in the Modeline section, after its
+;; settings.
 
 (setq use-short-answers t
       ring-bell-function 'ignore
@@ -227,6 +228,123 @@ missing-lexical-binding-cookie warning on every start.)
                         :weight 'bold
                         :family "Overpass Nerd Font"
                         :height (cdr spec))))
+#+end_src
+
+* Modeline
+
+The stock modeline is one long left-aligned run: legacy indicators
+(=-UUU:--- F1=), a soup of minor-mode lighters, and a load average
+next to the clock. Rebuild it from named segments — still with no new
+package. Emacs 30 added =mode-line-format-right-align=, Emacs 31
+collapses minor-mode lighters on its own (what the =minions= package
+used to do), and =nerd-icons= is already a dependency for the agenda
+category icons.
+
+Icons are resolved BY NAME through the =nerd-icons-*= functions and
+never typed as literal characters: Nerd Font PUA glyphs do not survive
+being written into a file by most tooling (they silently become zero
+bytes), and a name lookup sidesteps that class of bug entirely.
+Terminal frames — =EDITOR= is =emacsclient -t= — fall back to ASCII.
+
+#+begin_src emacs-lisp
+;; Icons come from "Symbols Nerd Font Mono", the family nerd-icons
+;; hardcodes; module.nix installs it (nerd-fonts.symbols-only).
+(require 'nerd-icons)
+;; The modeline references `project-mode-line-format' on every
+;; redisplay, so project.el has to be loaded, not merely autoloadable.
+(require 'project)
+
+;; Collapse every minor-mode lighter into a single "…" EXCEPT flymake,
+;; whose lighter is the error/warning count and worth the space.
+(setq mode-line-collapse-minor-modes '(not flymake-mode)
+      ;; display-time otherwise trails a load average; the eww bar
+      ;; already carries a clock, so keep this to just the time.
+      display-time-default-load-average nil
+      ;; Project name on the right (Emacs 30; off by default).
+      project-mode-line t)
+
+;; Enabled here rather than with the other built-in modes: the mode
+;; renders once on activation, so it has to come after the settings
+;; above or the first render still carries the load average.
+(display-time-mode 1)
+
+;; A battery segment only where there is a battery: battery.el leaves
+;; this nil on a desktop, so one config is right on both mega and the
+;; elitebook without consulting the host attrset.
+(when (and (require 'battery nil t) battery-status-function)
+  (display-battery-mode 1))
+
+;; Evil state as a colored tag, replacing evil's own "<N>". The faces
+;; inherit from semantic built-ins, so the theme keeps driving the
+;; palette and nothing here hardcodes a Nord hex.
+(defface my/mode-line-normal '((t :inherit font-lock-keyword-face :weight bold))
+  "Face for the evil normal state tag.")
+(defface my/mode-line-insert '((t :inherit success :weight bold))
+  "Face for the evil insert state tag.")
+(defface my/mode-line-visual '((t :inherit warning :weight bold))
+  "Face for the evil visual state tag.")
+(defface my/mode-line-replace '((t :inherit error :weight bold))
+  "Face for the evil replace state tag.")
+(defface my/mode-line-operator '((t :inherit font-lock-constant-face :weight bold))
+  "Face for the evil operator state tag.")
+(defface my/mode-line-emacs '((t :inherit font-lock-builtin-face :weight bold))
+  "Face for the emacs (non-evil) state tag.")
+
+(defvar my/mode-line-evil-states
+  '((normal   "NOR" my/mode-line-normal)
+    (insert   "INS" my/mode-line-insert)
+    (visual   "VIS" my/mode-line-visual)
+    (replace  "REP" my/mode-line-replace)
+    (operator "OPR" my/mode-line-operator)
+    (motion   "MOT" my/mode-line-normal)
+    (emacs    "EMA" my/mode-line-emacs))
+  "Tag text and face for each evil state.")
+
+(defun my/mode-line-icon (fn name fallback)
+  "Nerd-icon NAME looked up with FN, or FALLBACK on a terminal frame."
+  (if (display-graphic-p) (funcall fn name) fallback))
+
+(defun my/mode-line-state ()
+  "Evil state tag, or blank padding outside evil."
+  (if-let* ((entry (assq (bound-and-true-p evil-state) my/mode-line-evil-states)))
+      (propertize (format " %s " (nth 1 entry)) 'face (nth 2 entry))
+    "   "))
+
+(defun my/mode-line-buffer-state ()
+  "Read-only or modified indicator for the current buffer."
+  (cond (buffer-read-only
+         (my/mode-line-icon #'nerd-icons-faicon "nf-fa-lock" "%%"))
+        ((buffer-modified-p)
+         (my/mode-line-icon #'nerd-icons-mdicon "nf-md-circle_medium" "*"))
+        (t " ")))
+
+(defun my/mode-line-vc ()
+  "Branch name with an icon, minus the backend prefix `vc-mode' adds.
+`vc-mode' is a buffer-local string like \" Git-main\", so this costs
+nothing per redisplay."
+  (when (and vc-mode buffer-file-name)
+    (concat (my/mode-line-icon #'nerd-icons-octicon "nf-oct-git_branch" "on")
+            " "
+            (string-trim (replace-regexp-in-string
+                          "\\`[[:space:]]*[A-Za-z]+[-:@!?]" "" vc-mode))
+            "  ")))
+
+(setq-default mode-line-format
+              '("%e"
+                mode-line-front-space
+                (:eval (my/mode-line-state))
+                (:eval (my/mode-line-buffer-state))
+                " "
+                (:propertize "%b" face mode-line-buffer-id)
+                "  "
+                (:propertize "%l:%C" face shadow)
+                mode-line-format-right-align
+                (project-mode-line project-mode-line-format)
+                "  "
+                (:eval (my/mode-line-vc))
+                mode-line-modes
+                mode-line-misc-info
+                mode-line-end-spaces))
 #+end_src
 
 * Completion
@@ -328,7 +446,10 @@ regression vs Doom.
   (setq evil-want-keybinding nil   ; required by evil-collection
         evil-want-C-u-scroll t
         evil-want-fine-undo t
-        evil-undo-system 'undo-redo)
+        evil-undo-system 'undo-redo
+        ;; The Modeline section renders the state as a colored tag; this
+        ;; would otherwise add a second, plain "<N>" indicator.
+        evil-mode-line-format nil)
   :config
   (evil-mode 1))
 
