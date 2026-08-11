@@ -71,6 +71,7 @@ account list the notmuch UI builds from) come from
 nix, write it by hand:
 
 #+begin_src emacs-lisp :tangle no
+;;; arcmac-local.el --- machine-local settings -*- lexical-binding: t -*-
 (setq user-full-name "Ada Lovelace"
       user-mail-address "ada@example.org")
 (setq nd/mail-accounts '(("personal" "ada@example.org" "p")
