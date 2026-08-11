@@ -216,13 +216,6 @@ STRING, TABLE, PRED and POINT are the usual `try-completion' args."
   (interactive)
   (find-file (expand-file-name "config.org" user-emacs-directory)))
 
-(defun my/find-in-notes ()
-  "Find a file in `org-directory' (Doom's SPC n f)."
-  (interactive)
-  (require 'org) ; `org-directory' is set in a deferred use-package block
-  (let ((default-directory org-directory))
-    (project-find-file)))
-
 ;; Register commands under one prefix, same letters as the Doom-era
 ;; SPC r map (all built-ins; `r' upgrades to consult-register in P4).
 (defvar-keymap my/register-map
@@ -277,8 +270,6 @@ STRING, TABLE, PRED and POINT are the usual `try-completion' args."
     (kbd "<leader>bx") #'scratch-buffer
     (kbd "<leader>bz") #'bury-buffer
     (kbd "<leader>bc") #'clone-indirect-buffer-other-window
-    ;; notes
-    (kbd "<leader>nf") #'my/find-in-notes
     ;; open (agenda here; mail joins in the Mail section)
     (kbd "<leader>oa") #'org-agenda
     ;; git (magit; evil keys via evil-collection)
@@ -325,7 +316,6 @@ STRING, TABLE, PRED and POINT are the usual `try-completion' args."
 
   (which-key-add-key-based-replacements
     "SPC f" "files"
-    "SPC n" "notes"
     "SPC b" "buffers"
     "SPC o" "open"
     "SPC g" "git"
@@ -1119,9 +1109,17 @@ cursor is already on a heading) so the TODO retains its context."
   (interactive)
   (consult-ripgrep "~/org/"))
 
+(defun my/find-in-notes ()
+  "Find a file in `org-directory' (Doom's SPC n f)."
+  (interactive)
+  (require 'org) ; `org-directory' is set in a deferred use-package block
+  (let ((default-directory org-directory))
+    (project-find-file)))
+
 (with-eval-after-load 'evil
   (evil-define-key '(normal visual) 'global
     (kbd "<leader>X") #'org-capture
+    (kbd "<leader>nf") #'my/find-in-notes
     (kbd "<leader>n/") #'my/search-org
     (kbd "<leader>nR") #'consult-recoll
     (kbd "<leader>njo") #'org-journal-open-current-journal-file
