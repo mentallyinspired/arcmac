@@ -958,8 +958,6 @@ cursor is already on a heading) so the TODO retains its context."
   :ensure nil
   :commands (org-journal-new-entry
              org-journal-open-current-journal-file
-             org-journal-next-entry
-             org-journal-previous-entry
              org-journal-search)
   ;; Journal files are extensionless (e.g. 20260101) and org-journal
   ;; registers their mode association only once it's loaded — without
@@ -1219,6 +1217,24 @@ cursor is already on a heading) so the TODO retains its context."
   (let ((default-directory org-directory))
     (project-find-file)))
 
+;; Named commands rather than inline lambdas: which-key (and
+;; `describe-key') show the command name, so an anonymous binding
+;; renders as a useless "??"/"lambda" in the SPC n j listing.
+(defun my/journal-capture-meeting ()
+  "Capture a meeting into today's journal entry."
+  (interactive)
+  (org-capture nil "jm"))
+
+(defun my/journal-capture-work-log ()
+  "Capture a work log entry into today's journal entry."
+  (interactive)
+  (org-capture nil "jw"))
+
+(defun my/journal-capture-idea ()
+  "Capture an idea into today's journal entry."
+  (interactive)
+  (org-capture nil "ji"))
+
 (with-eval-after-load 'evil
   (evil-define-key '(normal visual) 'global
     (kbd "<leader>X") #'org-capture
@@ -1227,12 +1243,10 @@ cursor is already on a heading) so the TODO retains its context."
     (kbd "<leader>nR") #'consult-recoll
     (kbd "<leader>njo") #'org-journal-open-current-journal-file
     (kbd "<leader>njj") #'org-journal-new-entry
-    (kbd "<leader>njn") #'org-journal-next-entry
-    (kbd "<leader>njp") #'org-journal-previous-entry
     (kbd "<leader>njs") #'org-journal-search
-    (kbd "<leader>njm") (lambda () (interactive) (org-capture nil "jm"))
-    (kbd "<leader>njl") (lambda () (interactive) (org-capture nil "jw"))
-    (kbd "<leader>nji") (lambda () (interactive) (org-capture nil "ji")))
+    (kbd "<leader>njm") #'my/journal-capture-meeting
+    (kbd "<leader>njl") #'my/journal-capture-work-log
+    (kbd "<leader>nji") #'my/journal-capture-idea)
 
   (which-key-add-key-based-replacements
     "SPC n" "notes"
