@@ -721,16 +721,16 @@ not deleted here and get cleaned up when /tmp is wiped at reboot."
   (org-directory "~/org/")
   (calendar-week-start-day 1)
   (org-agenda-start-on-weekday 1)
+  ;; One inbox, one file per context, and the journal. Directory
+  ;; entries mean a new gtd file needs no config change.
   (org-agenda-files
-   '("~/org/sigtuna/projects.org"
-     "~/org/sigtuna/inbox.org"
-     "~/org/veltric/projects.org"
-     "~/org/veltric/inbox.org"
-     "~/org/nordic/projects.org"
-     "~/org/nordic/inbox.org"
-     "~/org/home/inbox.org"
-     "~/org/home/projects.org"
+   '("~/org/inbox.org"
+     "~/org/gtd/"
      "~/org/journal/"))
+  ;; Archive out of the way rather than beside the file: %s is the file
+  ;; name without its directory, so gtd/home.org lands in
+  ;; archive/home.org_archive.
+  (org-archive-location "~/org/archive/%s_archive::")
   (org-todo-keywords
    '((sequence "TODO(t)" "NEXT(n)" "|" "DONE(d!)")
      (sequence "BACKLOG(b)" "PLAN(p)" "READY(r)" "ACTIVE(a)"
@@ -797,7 +797,7 @@ not deleted here and get cleaned up when /tmp is wiped at reboot."
 
 (defun nd/people-roster ()
   "Return an alist of (NAME . ID) for every level-1 heading in people.org."
-  (with-current-buffer (find-file-noselect "~/org/databases/people.org")
+  (with-current-buffer (find-file-noselect "~/org/ref/people.org")
     (org-with-wide-buffer
      (org-map-entries
       (lambda ()
@@ -829,17 +829,33 @@ Names not in the roster pass through as plain text."
      picked ", ")))
 
 (defvar nd/capture-default-title nil
-  "Title captured by the Default file capture template; reused in #+TITLE.")
+  "Title captured by the Note capture template; reused in #+TITLE.")
 
-(defvar nd/action-inboxes
-  '(("Sigtuna" . "~/org/sigtuna/inbox.org")
-    ("Veltric" . "~/org/veltric/inbox.org")
-    ("Nordic"  . "~/org/nordic/inbox.org")
-    ("Home"    . "~/org/home/inbox.org"))
-  "Inboxes selectable by `nd/action-to-inbox'.")
+(defun nd/notes-directory ()
+  "The flat notes directory, created on first use."
+  (let ((dir (expand-file-name "notes/" org-directory)))
+    (unless (file-directory-p dir) (make-directory dir t))
+    dir))
+
+(defun nd/note-slug (title)
+  "Filename stem for TITLE: lowercase ASCII words joined by dashes.
+The real title lives in #+TITLE; the filename only has to be typeable
+at a completion prompt and safe in a link, which rules out spaces and
+the Swedish letters."
+  (let* ((s (downcase title))
+         (s (replace-regexp-in-string "[åä]" "a" s))
+         (s (replace-regexp-in-string "[öø]" "o" s))
+         (s (replace-regexp-in-string "[éè]" "e" s))
+         (s (replace-regexp-in-string "ü" "u" s))
+         (s (replace-regexp-in-string "[^a-z0-9]+" "-" s)))
+    (string-trim s "-+" "-+")))
+
+(defvar nd/inbox-file "~/org/inbox.org"
+  "The one capture target. Everything is routed out of it at review
+time rather than filed into a context at capture time.")
 
 (defun nd/action-to-inbox ()
-  "File current line, heading, or region as a TODO into a chosen inbox.
+  "File current line, heading, or region as a TODO into `nd/inbox-file'.
 Adds a Backlink to the enclosing org entry (one level above, if the
 cursor is already on a heading) so the TODO retains its context."
   (interactive)
@@ -856,9 +872,7 @@ cursor is already on a heading) so the TODO retains its context."
          (action (string-trim
                   (replace-regexp-in-string
                    "^[ \t]*[-+*][ \t]*" "" raw)))
-         (target (completing-read
-                  "Inbox: " (mapcar #'car nd/action-inboxes) nil t))
-         (inbox (expand-file-name (cdr (assoc target nd/action-inboxes))))
+         (inbox (expand-file-name nd/inbox-file))
          (src-pos (save-excursion
                     (org-back-to-heading t)
                     (when on-heading (org-up-heading-safe))
@@ -884,7 +898,7 @@ cursor is already on a heading) so the TODO retains its context."
       (insert (format "* TODO %s\n%s\nBacklink: [[id:%s][%s]]\n"
                       action ts src-id src-title))
       (save-buffer))
-    (message "Filed to %s: %s" target action)))
+    (message "Filed to inbox: %s" action)))
 
 (defun nd/attach-url-and-insert ()
   "Attach a URL to the current entry and insert a link to it."
@@ -894,47 +908,34 @@ cursor is already on a heading) so the TODO retains its context."
 
 (with-eval-after-load 'org
   (setq org-capture-templates
-        '(("s" "Sigtuna")
-          ("si" "Inbox" entry (file "~/org/sigtuna/inbox.org")
+        `(("i" "Inbox" entry (file ,nd/inbox-file)
            "* TODO %? %(nd/read-tags)\n%U\n%a")
-          ("sp" "Project" entry (file "~/org/sigtuna/projects.org")
+
+          ("p" "Project")
+          ("ps" "Sigtuna" entry (file "~/org/gtd/sigtuna.org")
+           "* TODO %^{Title} %(nd/read-tags)\n%U\n%a\n%?")
+          ("pv" "Veltric" entry (file "~/org/gtd/veltric.org")
+           "* TODO %^{Title} %(nd/read-tags)\n%U\n%a\n%?")
+          ("pn" "Nordic" entry (file "~/org/gtd/nordic.org")
+           "* TODO %^{Title} %(nd/read-tags)\n%U\n%a\n%?")
+          ("ph" "Home" entry (file "~/org/gtd/home.org")
            "* TODO %^{Title} %(nd/read-tags)\n%U\n%a\n%?")
 
-          ("v" "Veltric")
-          ("vi" "Inbox" entry (file "~/org/veltric/inbox.org")
-           "* TODO %? %(nd/read-tags)\n%U\n%a")
-          ("vp" "Project" entry (file "~/org/veltric/projects.org")
-           "* TODO %^{Title} %(nd/read-tags)\n%U\n%a\n%?")
-
-          ("n" "Nordic")
-          ("ni" "Inbox" entry (file "~/org/nordic/inbox.org")
-           "* TODO %? %(nd/read-tags)\n%U\n%a")
-          ("np" "Project" entry (file "~/org/nordic/projects.org")
-           "* TODO %^{Title} %(nd/read-tags)\n%U\n%a\n%?")
-
-          ("h" "Home")
-          ("hi" "Inbox" entry (file "~/org/home/inbox.org")
-           "* TODO %? %(nd/read-tags)\n%U\n%a")
-          ("hp" "Project" entry (file "~/org/home/projects.org")
-           "* TODO %^{Title} %(nd/read-tags)\n%U\n%a\n%?")
-
-          ("f" "New file" plain
+          ("n" "Note" plain
            (file (lambda ()
-                   (let* ((default-directory (expand-file-name "~/org/"))
+                   (let ((title (read-string "Title: ")))
+                     (setq nd/capture-default-title title)
+                     (expand-file-name (concat (nd/note-slug title) ".org")
+                                       (nd/notes-directory)))))
+           ":PROPERTIES:\n:ID:       %(org-id-new)\n:END:\n#+TITLE: %(progn nd/capture-default-title)\n#+AUTHOR: %n\n#+DATE: %u\n\n%?"
+           :unnarrowed t)
+
+          ("f" "Note at a path I pick" plain
+           (file (lambda ()
+                   (let* ((default-directory (nd/notes-directory))
                           (path (read-file-name "New org file: " default-directory)))
                      (if (string-suffix-p ".org" path) path (concat path ".org")))))
            ":PROPERTIES:\n:ID:       %(org-id-new)\n:END:\n#+TITLE: %^{Title}\n#+AUTHOR: %n\n#+DATE: %u\n\n%?"
-           :unnarrowed t)
-
-          ("d" "Default file" plain
-           (file (lambda ()
-                   (let* ((title (read-string "Title: "))
-                          (filename (replace-regexp-in-string " " "_" title))
-                          (dir (expand-file-name "~/org/default/")))
-                     (unless (file-directory-p dir) (make-directory dir t))
-                     (setq nd/capture-default-title title)
-                     (expand-file-name (concat filename ".org") dir))))
-           ":PROPERTIES:\n:ID:       %(org-id-new)\n:END:\n#+TITLE: %(progn nd/capture-default-title)\n#+AUTHOR: %n\n#+DATE: %u\n\n%?"
            :unnarrowed t)
 
           ("jm" "Meeting" plain (function nd/org-journal-find-location)
@@ -990,9 +991,15 @@ cursor is already on a heading) so the TODO retains its context."
   :ensure nil
   :after org
   :config
-  (setq org-download-image-dir "~/org/assets"
+  ;; One directory for every binary: dragged-in images, org-attach's
+  ;; id-addressed subdirectories, and the pile the Obsidian import left
+  ;; behind all live in ~/org/attachments now.
+  (setq org-download-image-dir "~/org/attachments"
         org-download-method 'directory
         org-download-heading-lvl nil))
+
+(with-eval-after-load 'org-attach
+  (setq org-attach-id-dir "~/org/attachments/"))
 
 (setq org-agenda-start-with-log-mode t
       org-agenda-block-separator 8411)
@@ -1012,7 +1019,11 @@ cursor is already on a heading) so the TODO retains its context."
 (setq org-agenda-custom-commands
       '(("wd" "Work DONE"
          ((agenda ""
-                  ((org-agenda-files '("~/org/sigtuna/inbox.org_archive"))
+                  (;; A wildcard, not a list: org-agenda-file-regexp only
+                   ;; matches .org, so an archive/ directory entry would
+                   ;; find nothing.
+                   (org-agenda-files
+                    (file-expand-wildcards "~/org/archive/sigtuna*.org_archive"))
                    (org-agenda-span 100)
                    (org-agenda-start-day "-100d")
                    (org-agenda-start-on-weekday nil)
@@ -1020,7 +1031,7 @@ cursor is already on a heading) so the TODO retains its context."
 
         ("wp" "Work PROJECTS"
          ((tags-todo "project+LEVEL=1-someday"
-                     ((org-agenda-files '("~/org/sigtuna/projects.org"))
+                     ((org-agenda-files '("~/org/gtd/sigtuna.org"))
                       (org-agenda-prefix-format "%l%l")
                       (org-agenda-show-inherited-tags nil)
                       (org-agenda-overriding-header "PROJEKT")))))
