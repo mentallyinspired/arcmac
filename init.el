@@ -1242,7 +1242,7 @@ cursor is already on a heading) so the TODO retains its context."
     (kbd "<leader>n/") #'my/search-org
     (kbd "<leader>nR") #'consult-recoll
     (kbd "<leader>njo") #'org-journal-open-current-journal-file
-    (kbd "<leader>njj") #'org-journal-new-entry
+    (kbd "<leader>njn") #'org-journal-new-entry
     (kbd "<leader>njs") #'org-journal-search
     (kbd "<leader>njm") #'my/journal-capture-meeting
     (kbd "<leader>njl") #'my/journal-capture-work-log
