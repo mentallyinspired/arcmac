@@ -47,8 +47,9 @@ account-specific behavior — notmuch hello sections, saved searches with jump
 keys, Fcc routing, sent-push — from the `nd/mail-accounts` triples
 `(NAME ADDRESS KEY)` in that file. Keep it that way: no names, addresses, or
 machine paths in tracked files. Machine differences that are *detectable*
-(WSL, missing language servers) are handled at runtime in config.org, not via
-options.
+(missing language servers) are handled at runtime in config.org, not via
+options. Nix-side WSL differences are the exception — evaluation cannot
+detect WSL without reading /proc, so `programs.arcmac.wsl.enable` states it.
 
 **module.nix is a function over the flake's inputs** (`{ emacs-overlay }:`
 wrapper) so consumers get the prebuilt Emacs 31 pretest without wiring the
@@ -72,5 +73,5 @@ Assertions enforce exactly one `primary` account and unique inbox jump keys.
 ## Consumers
 
 - `~/niri-noah` (NixOS, both machines) — wired via `home-manager.sharedModules`
-- `~/dev/wsl-doomster` (standalone HM on Ubuntu/WSL) — module in the
-  homeConfiguration's module list, `daemon.target = "default.target"`
+- `~/dotfiles` (standalone HM on Ubuntu/WSL) — module in the
+  homeConfiguration's module list, `wsl.enable = true`

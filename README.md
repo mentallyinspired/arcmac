@@ -38,9 +38,14 @@ programs.arcmac = {
   # Per-machine font size in pixels (default 16 ≈ 12pt):
   # fontSize = 18;
 
+  # On WSL: ties the daemon to default.target (no compositor-managed
+  # graphical-session.target) and mirrors the launchers into
+  # ~/.local/share/applications so WSLg exports them to the Start Menu.
+  # wsl.enable = true;
+
   # daemon.target defaults to graphical-session.target (right under niri
   # and other compositors that import the display env into systemd);
-  # on WSL / headless machines use default.target:
+  # on headless machines that are not WSL use default.target:
   # daemon.target = "default.target";
 
   # Optional: the full notmuch mail stack (mbsync + msmtp + afew,

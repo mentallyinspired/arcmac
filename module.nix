@@ -50,7 +50,21 @@ let
   # so both entry points pin --init-directory. That also keeps any install in
   # a default location (say a dormant Doom in ~/.config/emacs) from booting
   # by accident.
+  #
+  # The wrapper also prepends the Home Manager profile to PATH: the tools
+  # below (hunspell, graphviz, wl-clipboard, languagetool) are installed
+  # there and the config expects them, but neither entry point is guaranteed
+  # to inherit a login shell's PATH. The systemd user manager on Debian and
+  # Ubuntu is the sharp case — /etc/environment is symlinked into
+  # environment.d as 99-environment.conf and its absolute PATH= overrides
+  # home-manager's 10-home-manager.conf, so the daemon starts with a stock
+  # /usr/bin PATH and ispell-set-spellchecker-params finds no hunspell, falls
+  # back to a nonexistent "ispell" and errors out — which kills --fg-daemon.
+  # WSLg-exported desktop shortcuts start equally bare. Prepending (rather
+  # than pinning Environment=PATH= on the unit) keeps whatever the platform
+  # already provides, which is what NixOS needs.
   emacsWrapped = pkgs.writeShellScriptBin "emacs" ''
+    export PATH="${config.home.profileDirectory}/bin:$PATH"
     exec ${arcmacEmacs}/bin/emacs --init-directory "$HOME/.config/arcmac" "$@"
   '';
 
@@ -82,6 +96,13 @@ in
       };
     };
 
+    wsl.enable = lib.mkEnableOption ''
+      WSL/WSLg adjustments. Not detectable during evaluation (reading
+      /proc/sys/kernel/osrelease would make the flake impure), so it has to
+      be stated: it defaults daemon.target to default.target and mirrors the
+      launchers into ~/.local/share/applications for the Windows Start Menu
+    '';
+
     fontSize = lib.mkOption {
       type = lib.types.int;
       default = 16;
@@ -102,15 +123,18 @@ in
 
       target = lib.mkOption {
         type = lib.types.str;
-        default = "graphical-session.target";
+        default = if cfg.wsl.enable then "default.target" else "graphical-session.target";
+        defaultText = lib.literalExpression ''
+          "default.target" when wsl.enable, otherwise "graphical-session.target"
+        '';
         example = "default.target";
         description = ''
           systemd user target the daemon is tied to. Compositors that import
           WAYLAND_DISPLAY/DISPLAY into the systemd user environment before
           graphical-session.target (niri does) need the default: with
           default.target the daemon starts env-less and browse-url silently
-          fails to hand off to the browser. On WSL or headless machines use
-          default.target.
+          fails to hand off to the browser. wsl.enable already switches this
+          to default.target; set it by hand on other headless machines.
         '';
       };
     };
@@ -237,6 +261,37 @@ in
         "TextEditor"
       ];
     };
+
+    # WSLg exports .desktop files from the standard XDG data dirs to the
+    # Windows Start Menu, but never scans the nix profile — where
+    # xdg.desktopEntries above actually lands, since home-manager delivers
+    # those through home.packages. Mirror the launchers into
+    # ~/.local/share/applications, with an absolute Icon path (WSLg has no
+    # icon theme to resolve "emacs" against) and profile-relative Exec paths
+    # (stable across rebuilds, unlike store paths, so an already-exported
+    # Start Menu shortcut survives a garbage collection).
+    xdg.dataFile = lib.mkIf cfg.wsl.enable (
+      let
+        profileBin = "${config.home.profileDirectory}/bin";
+        entry = name: exec: ''
+          [Desktop Entry]
+          Name=${name}
+          GenericName=Text Editor
+          Exec=${exec}
+          Icon=${./emacs-icon.png}
+          Type=Application
+          Terminal=false
+          Categories=Development;TextEditor;
+          StartupNotify=true
+          StartupWMClass=Emacs
+        '';
+      in
+      {
+        "applications/emacs.desktop".text = entry "Emacs" "${profileBin}/emacs %F";
+        "applications/emacs-client.desktop".text =
+          entry "Emacs (Client)" "${profileBin}/emacsclient --create-frame %F";
+      }
+    );
 
     systemd.user.services.emacs = lib.mkIf cfg.daemon.enable {
       Unit = {
