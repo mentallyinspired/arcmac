@@ -760,6 +760,10 @@ not deleted here and get cleaned up when /tmp is wiped at reboot."
   (org-refile-allow-creating-parent-nodes 'confirm)
   ;; Own org-id database — never share Doom's.
   (org-id-locations-file (expand-file-name "org-id-locations" my/state-dir))
+  ;; Link by ID, not by path. Doom set this and the port missed it: with
+  ;; the default nil, `org-store-link' and the dashboard's org-ql blocks
+  ;; emit file:/abs/path::*Heading, which any rename or retitle breaks.
+  (org-id-link-to-org-use-id t)
   :config
   (add-to-list 'org-modules 'org-habit t))
 
