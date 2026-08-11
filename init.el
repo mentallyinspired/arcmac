@@ -151,7 +151,10 @@ STRING, TABLE, PRED and POINT are the usual `try-completion' args."
   (completion-ignore-case t)
   (completion-show-help nil)
   (completion-styles '(partial-completion flex initials))
-  (completion-category-overrides '((eglot-capf (styles flex-noinsert))))
+  ;; project-file: scattered-letter flex matches are noise for file
+  ;; names — require the typed text as a contiguous substring instead.
+  (completion-category-overrides '((eglot-capf (styles flex-noinsert))
+                                   (project-file (styles substring))))
   (completions-format 'one-column)
   (completions-max-height 10)
   (completions-sort 'historical)
