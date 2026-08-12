@@ -212,6 +212,27 @@ missing-lexical-binding-cookie warning on every start.)
 
 (load-theme 'doom-nord t)
 
+;; doom-themes and gnus each define one half of a face inheritance cycle:
+;; gnus has `gnus-group-news-low' inherit `gnus-group-news-low-empty'
+;; (gnus.el), and doom-themes points the same pair the other way. Nothing
+;; complains until something defines those faces for real, at which point
+;; the defface throws "Face inheritance results in inheritance cycle".
+;;
+;; It surfaces here as org noise — `org-load-modules-maybe' catches the
+;; error and prints "Problems while trying to load feature `ol-gnus'"
+;; (and `ol-eww', which reaches gnus too) on every org buffer, with the
+;; actual error swallowed. Nothing to do with org: reproducible in emacs
+;; -Q with load-theme + (require 'ol-gnus).
+;;
+;; Re-point the doom half at the mail face it should have used, breaking
+;; the back edge. A user spec outranks the theme's, and it has to be set
+;; before gnus loads, which is why it lives beside `load-theme' rather
+;; than in a `with-eval-after-load'. Fixing the face rather than dropping
+;; the org modules keeps it fixed for anything else that pulls gnus's
+;; faces in.
+(custom-set-faces
+ '(gnus-group-news-low-empty ((t (:inherit gnus-group-mail-1-empty)))))
+
 ;; Same face tweaks as the Doom config: italic comments and keywords,
 ;; and scaled variable-pitch markdown headers.
 (set-face-attribute 'font-lock-comment-face nil :slant 'italic)
