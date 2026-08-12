@@ -500,6 +500,49 @@ STRING, TABLE, PRED and POINT are the usual `try-completion' args."
 (add-hook 'text-mode-hook #'flyspell-mode)
 (add-hook 'prog-mode-hook #'flyspell-prog-mode)
 
+;; `ispell-word' (what evil's z= and M-$ run) answers in a *Choices*
+;; window at the TOP of the frame, and buries its accept/save commands
+;; behind `?' — with two dictionaries live, saving a word is the common
+;; case, not a rare one. flyspell-correct runs the same hunspell
+;; suggestions through `completing-read', where [Save], [Accept
+;; (session)] and [Accept (buffer)] are candidates you can see. Saving
+;; writes to `ispell-personal-dictionary' above.
+;;
+;; Remapping the command rather than binding a key means z= and M-$ both
+;; follow, since both were already `ispell-word'.
+(use-package flyspell-correct
+  :ensure nil
+  :bind ([remap ispell-word] . flyspell-correct-at-point))
+
+;; RET on a misspelled word corrects it. The binding goes in
+;; `flyspell-mouse-map', which flyspell hangs off an overlay `keymap'
+;; property covering the misspelling and nothing else (flyspell.el:1837),
+;; so RET is untouched everywhere else — `evil-ret' in a file,
+;; `org-agenda-switch-to' in the agenda. That property is also consulted
+;; before evil's emulation maps, which is what makes the binding
+;; reachable in normal state at all.
+;;
+;; The :filter decides per keypress: returning nil (rather than a
+;; command) means the lookup falls through to the next keymap, so a
+;; correctly spelled word leaves RET doing whatever it already did.
+;; It declines with a region active or in insert/emacs state, where RET
+;; is already doing something less interruptible.
+;;
+;; Set up on flyspell load, not flyspell-correct's: the command is
+;; autoloaded, but the binding has to exist BEFORE the first RET or
+;; there is nothing to trigger the load.
+(with-eval-after-load 'flyspell
+  (dolist (key (list (kbd "RET") [return]))
+    (define-key flyspell-mouse-map key
+      `(menu-item "" flyspell-correct-at-point
+                  :filter ,(lambda (cmd)
+                             (and (not (region-active-p))
+                                  (not (and (bound-and-true-p evil-local-mode)
+                                            (or (evil-insert-state-p)
+                                                (evil-emacs-state-p))))
+                                  (memq 'flyspell-incorrect (face-at-point nil t))
+                                  cmd))))))
+
 (defvar my-ispell-languages '("en_US,sv_SE" "sv_SE" "en_US")
   "List of Ispell dictionaries to cycle through.")
 

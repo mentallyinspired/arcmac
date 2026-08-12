@@ -33,6 +33,7 @@ let
       nerd-icons # agenda category icons (fonts already installed)
       consult # ripgrep/register UIs; dep of consult-recoll
       consult-recoll # recoll full-text search over ~/org
+      flyspell-correct # correction UI with a visible Save; ispell-word hides it
       nix-ts-mode # nix has no built-in major mode
       zig-ts-mode # zig has no built-in major mode
       markdown-mode # no built-in markdown mode either
