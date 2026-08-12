@@ -43,6 +43,17 @@ frame stripping here, everything else in =init.el=.
 (setq inhibit-startup-screen t
       frame-inhibit-implied-resize t)
 
+;; Emacs sizes a frame in whole character cells by default, so when a
+;; window manager hands it an arbitrary geometry — Windows snap/tiling
+;; through WSLg is the case that shows it — it rounds DOWN to the last
+;; whole column and row and leaves the remainder as dead space at the
+;; right and bottom edges. A gap up to one line tall and one column wide.
+;; Pixelwise resizing lets the frame take the size it was actually given.
+;; Set here rather than in init.el: it has to be in effect before the
+;; first frame is created.
+(setq frame-resize-pixelwise t
+      window-resize-pixelwise t)
+
 ;; Strip UI chrome before the first frame is drawn.
 (push '(menu-bar-lines . 0) default-frame-alist)
 (push '(tool-bar-lines . 0) default-frame-alist)
