@@ -738,8 +738,22 @@ not deleted here and get cleaned up when /tmp is wiped at reboot."
                "COMPLETED(c)" "CANC(k@)")))
   (org-log-done 'time)
   (org-log-into-drawer t)
+  ;; Drawers folded on visit. `org-cycle-hide-drawer-startup' is already t
+  ;; by default, but the default `showeverything' startup state is the one
+  ;; value that explicitly overrides it (org-cycle.el: the whole drawer /
+  ;; block / archive branch is skipped for it), so the :PROPERTIES: and
+  ;; :LOGBOOK: drawers stayed open on every heading. `nofold' means the
+  ;; same fully-unfolded headings, minus that override.
+  (org-startup-folded 'nofold)
   (org-hide-emphasis-markers t)
   (org-ellipsis " ▼ ")
+  ;; Indent headings and their body by nesting level. org-modern turns
+  ;; off its own leading-star hiding under org-indent-mode, but
+  ;; org-indent sets `org-hide-leading-stars' itself, so the bullet still
+  ;; stands alone. Headings are monospace (see *Modern styling*), which
+  ;; is what makes the steps line up at all — org-indent measures its
+  ;; prefixes in space widths.
+  (org-startup-indented t)
   (org-indent-indentation-per-level 1)
   (org-treat-insert-todo-heading-as-state-change t)
   (org-table-convert-region-max-lines 20000)
@@ -792,6 +806,15 @@ not deleted here and get cleaned up when /tmp is wiped at reboot."
         (?B :foreground "#ffd966" :weight bold)
         (?C :foreground "#c678dd" :weight bold)))
 
+(defun nd/org-modern-labels (alist)
+  "Make ALIST of face plists render as filled org-modern labels."
+  (mapcar (lambda (entry)
+            (cons (car entry)
+                  (if (plist-get (cdr entry) :background)
+                      (cdr entry)
+                    (append (cdr entry) '(:inverse-video t)))))
+          alist))
+
 (use-package org-modern
   :ensure nil
   :hook ((org-mode . org-modern-mode)
@@ -809,37 +832,28 @@ not deleted here and get cleaned up when /tmp is wiped at reboot."
   ;; Block *names* are still styled; only the gutter rule is off.
   (org-modern-block-fringe nil)
   :config
-  ;; Labels take their colour from these, so the alists above stay the
-  ;; single source. A keyword with only a :foreground renders as tinted
-  ;; text with padding rather than a filled pill; give it a :background
-  ;; in `org-todo-keyword-faces' to get the full badge.
-  (setq org-modern-todo-faces org-todo-keyword-faces
-        org-modern-tag-faces org-tag-faces
-        org-modern-priority-faces org-priority-faces))
+  ;; 0.8 is org-modern's default and reads a little shrunken against
+  ;; body text. These stay under 1.0 on purpose: the labels are boxed,
+  ;; and at full height the box would add to the line height.
+  (set-face-attribute 'org-modern-label nil :height 0.9)
+  ;; Labels take their colour from the alists above, so those stay the
+  ;; single source. They need one transform first: org-modern paints the
+  ;; face straight onto the label, so a face carrying only a :foreground
+  ;; gives tinted text in a box rather than a filled pill. Flipping it
+  ;; with :inverse-video is exactly what org-modern's own default todo
+  ;; face does; the keywords that already name a :background (NEXT, WAIT,
+  ;; HOLD) are pills as written and are left alone.
+  (setq org-modern-todo-faces (nd/org-modern-labels org-todo-keyword-faces)
+        org-modern-tag-faces (nd/org-modern-labels org-tag-faces)
+        org-modern-priority-faces (nd/org-modern-labels org-priority-faces)))
 
-;; Tags right-align to a fixed column, which only lines up when the
-;; heading is monospace — these are variable-pitch and scaled, so the
-;; padding lands ragged. Park the labels straight after the title.
+;; Tags right-align by padding to a fixed COLUMN, which assumes a tag
+;; occupies its own character count. org-modern's are boxed labels at
+;; :height 0.9 :width condensed, so their pixel width is not their
+;; column width and the padding lands ragged no matter what. Park them
+;; straight after the title instead.
 (setq org-auto-align-tags nil
       org-tags-column 0)
-
-;; Headline scaling, matching the markdown-header-face block in *Fonts
-;; and theme*. Only :family/:height/:weight are set, so doom-nord keeps
-;; owning the colours.
-(with-eval-after-load 'org
-  (dolist (spec '((org-document-title . 1.8)
-                  (org-level-1 . 1.7)
-                  (org-level-2 . 1.6)
-                  (org-level-3 . 1.5)
-                  (org-level-4 . 1.4)
-                  (org-level-5 . 1.3)
-                  (org-level-6 . 1.2)
-                  (org-level-7 . 1.1)
-                  (org-level-8 . 1.1)))
-    (set-face-attribute (car spec) nil
-                        :weight 'bold
-                        :family "Overpass Nerd Font"
-                        :height (cdr spec))))
 
 (defun nd/org-journal-find-location ()
   "Open today's journal entry for capture without inserting a new heading."
