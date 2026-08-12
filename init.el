@@ -1281,7 +1281,69 @@ cursor is already on a heading) so the TODO retains its context."
   (evil-define-key '(normal visual) org-mode-map
     (kbd "<leader>ma") #'nd/action-to-inbox
     (kbd "<leader>mB") #'org-babel-tangle
-    (kbd "<leader>mli") #'nd/attach-url-and-insert))
+    ;; dates — the pair this map exists for
+    (kbd "<leader>mds") #'org-schedule
+    (kbd "<leader>mdd") #'org-deadline
+    (kbd "<leader>mdt") #'org-time-stamp
+    (kbd "<leader>mdT") #'org-time-stamp-inactive
+    ;; entry state and metadata
+    (kbd "<leader>mt") #'org-todo
+    (kbd "<leader>mp") #'org-priority
+    (kbd "<leader>mq") #'org-set-tags-command
+    (kbd "<leader>mr") #'org-refile
+    (kbd "<leader>ms") #'org-sort
+    (kbd "<leader>mo") #'org-set-property
+    ;; org-archive-location sends these to ~/org/archive/, see Settings
+    (kbd "<leader>mA") #'org-archive-subtree
+    ;; org-id-link-to-org-use-id is t, so a stored link needs an ID to
+    ;; point at — this is how an entry gets one before it is linked to
+    (kbd "<leader>mI") #'org-id-get-create
+    ;; clock
+    (kbd "<leader>mci") #'org-clock-in
+    (kbd "<leader>mco") #'org-clock-out
+    (kbd "<leader>mcc") #'org-clock-cancel
+    (kbd "<leader>mcg") #'org-clock-goto
+    (kbd "<leader>mcR") #'org-clock-report
+    (kbd "<leader>mcE") #'org-set-effort
+    ;; links
+    (kbd "<leader>mll") #'org-insert-link
+    (kbd "<leader>mlL") #'org-store-link
+    (kbd "<leader>mli") #'nd/attach-url-and-insert
+    ;; the source block under point, in its own major mode
+    (kbd "<leader>m'") #'org-edit-special
+    (kbd "<leader>me") #'org-export-dispatch))
+
+(with-eval-after-load 'org-agenda
+  (evil-define-key '(normal visual) org-agenda-mode-map
+    ;; Same letters as the org-mode-map block above, via the agenda's own
+    ;; commands — those operate on the entry the agenda line points at,
+    ;; then refresh the line. The plain org-* versions would edit the
+    ;; agenda buffer's own text instead.
+    (kbd "<leader>mds") #'org-agenda-schedule
+    (kbd "<leader>mdd") #'org-agenda-deadline
+    (kbd "<leader>mt") #'org-agenda-todo
+    (kbd "<leader>mp") #'org-agenda-priority
+    (kbd "<leader>mq") #'org-agenda-set-tags
+    (kbd "<leader>mr") #'org-agenda-refile
+    (kbd "<leader>mo") #'org-agenda-set-property
+    (kbd "<leader>mA") #'org-agenda-archive
+    (kbd "<leader>mci") #'org-agenda-clock-in
+    (kbd "<leader>mco") #'org-agenda-clock-out
+    (kbd "<leader>mcc") #'org-agenda-clock-cancel
+    (kbd "<leader>mcg") #'org-agenda-clock-goto
+    (kbd "<leader>mcE") #'org-agenda-set-effort
+    ;; `<leader>' is a pseudo-key: evil binds the real SPC globally to a
+    ;; lookup of [leader ...] across the active maps. evil-collection
+    ;; binds SPC directly in this map, which outranks that global entry,
+    ;; so the lookup never runs and every binding above is unreachable
+    ;; until SPC is cleared here. nil (not `undefined') is the point — a
+    ;; nil binding does not shadow, so SPC falls through to the leader.
+    ;; This runs after evil-collection's own org-agenda setup: it
+    ;; registers its `with-eval-after-load' during evil-collection-init,
+    ;; up in *Evil*, which is earlier in this file than *Org*.
+    (kbd "SPC") nil
+    ;; Displaced by that; see the note in this section.
+    (kbd "g SPC") #'org-agenda-show))
 
 (defun my/search-org ()
   "Full-text search across ~/org with ripgrep."
@@ -1330,4 +1392,6 @@ cursor is already on a heading) so the TODO retains its context."
     "SPC n" "notes"
     "SPC n j" "journal"
     "SPC m" "mode"
+    "SPC m c" "clock"
+    "SPC m d" "dates"
     "SPC m l" "links"))
