@@ -792,6 +792,55 @@ not deleted here and get cleaned up when /tmp is wiped at reboot."
         (?B :foreground "#ffd966" :weight bold)
         (?C :foreground "#c678dd" :weight bold)))
 
+(use-package org-modern
+  :ensure nil
+  :hook ((org-mode . org-modern-mode)
+         ;; The agenda is assembled text, not an org buffer, so it needs
+         ;; its own pass — labels there match the files they came from.
+         (org-agenda-finalize . org-modern-agenda))
+  :custom
+  ;; Bullets per level (the org-bullets look). The default `fold' shows
+  ;; ▶/▼ fold state in the star's place instead — swap if that reads
+  ;; better than the ellipsis already does.
+  (org-modern-star 'replace)
+  ;; The block bar is drawn in the FRINGE, which stays pinned to the
+  ;; window edge while visual-fill-column pushes text to the middle with
+  ;; margins — the bar would float far left of the block it belongs to.
+  ;; Block *names* are still styled; only the gutter rule is off.
+  (org-modern-block-fringe nil)
+  :config
+  ;; Labels take their colour from these, so the alists above stay the
+  ;; single source. A keyword with only a :foreground renders as tinted
+  ;; text with padding rather than a filled pill; give it a :background
+  ;; in `org-todo-keyword-faces' to get the full badge.
+  (setq org-modern-todo-faces org-todo-keyword-faces
+        org-modern-tag-faces org-tag-faces
+        org-modern-priority-faces org-priority-faces))
+
+;; Tags right-align to a fixed column, which only lines up when the
+;; heading is monospace — these are variable-pitch and scaled, so the
+;; padding lands ragged. Park the labels straight after the title.
+(setq org-auto-align-tags nil
+      org-tags-column 0)
+
+;; Headline scaling, matching the markdown-header-face block in *Fonts
+;; and theme*. Only :family/:height/:weight are set, so doom-nord keeps
+;; owning the colours.
+(with-eval-after-load 'org
+  (dolist (spec '((org-document-title . 1.8)
+                  (org-level-1 . 1.7)
+                  (org-level-2 . 1.6)
+                  (org-level-3 . 1.5)
+                  (org-level-4 . 1.4)
+                  (org-level-5 . 1.3)
+                  (org-level-6 . 1.2)
+                  (org-level-7 . 1.1)
+                  (org-level-8 . 1.1)))
+    (set-face-attribute (car spec) nil
+                        :weight 'bold
+                        :family "Overpass Nerd Font"
+                        :height (cdr spec))))
+
 (defun nd/org-journal-find-location ()
   "Open today's journal entry for capture without inserting a new heading."
   (org-journal-new-entry t)

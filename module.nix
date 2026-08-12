@@ -29,6 +29,7 @@ let
       org-download # paste/drag images into org (assets dir)
       visual-fill-column # centered 140-col org buffers
       org-ql # my-org-ql dynamic block (dashboard.org depends on it)
+      org-modern # org headline/list/block/TODO styling; nothing built-in does it
       nerd-icons # agenda category icons (fonts already installed)
       consult # ripgrep/register UIs; dep of consult-recoll
       consult-recoll # recoll full-text search over ~/org
