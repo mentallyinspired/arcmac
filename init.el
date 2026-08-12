@@ -845,6 +845,14 @@ not deleted here and get cleaned up when /tmp is wiped at reboot."
   :config
   (add-to-list 'org-modules 'org-habit t))
 
+;; `project' marks the project heading and nothing else. Without this it
+;; is inherited by every action inside the project, and then "-project"
+;; — the matcher every task block leans on — excludes exactly the
+;; actions it exists to list. The context tags (@home/sigtuna/veltric/
+;; nordic) are the opposite case: they SHOULD cascade, so tagging a
+;; project carries its whole action tree into that context's view.
+(setq org-tags-exclude-from-inheritance '("project"))
+
 (setq org-tag-persistent-alist '(("@home" . ?h)
                                  ("sigtuna" . ?s)
                                  ("veltric" . ?v)
@@ -859,10 +867,12 @@ not deleted here and get cleaned up when /tmp is wiped at reboot."
 (setq org-todo-keyword-faces
       '(("TODO" . (:foreground "goldenrod" :weight bold))
         ("NEXT" . (:foreground "White" :background "ForestGreen" :weight bold))
-        ("STARTED" . (:foreground "White" :background "DarkViolet" :weight bold))
+        ;; ACTIVE inherits the slot STARTED used to hold: STARTED and VOID
+        ;; came over from Doom and are not in `org-todo-keywords', so they
+        ;; only ever styled text that cannot exist.
+        ("ACTIVE" . (:foreground "White" :background "DarkViolet" :weight bold))
         ("WAIT" . (:foreground "White" :background "DarkOrange1" :weight bold))
         ("HOLD" . (:foreground "White" :background "SlateGray" :weight bold))
-        ("VOID" . (:foreground "White" :background "Brown" :weight bold))
         ("DONE" . (:foreground "Silver" :weight regular))))
 
 (setq org-priority-faces
@@ -1037,6 +1047,20 @@ cursor is already on a heading) so the TODO retains its context."
   (call-interactively #'org-attach-url)
   (org-insert-last-stored-link 1))
 
+(defun nd/project-template (context)
+  "Capture body for a new project in CONTEXT.
+PLAN, not TODO: projects take their state from the second sequence in
+`org-todo-keywords' (BACKLOG/PLAN/READY/ACTIVE/REVIEW/WAIT/HOLD), and
+their actions take TODO/NEXT from the first. Both tags are written in
+rather than prompted for — a project that is not tagged `project' is
+invisible to every agenda block, and one without its context tag cannot
+be filtered to."
+  (concat "* PLAN %^{Project} :project:" context ":\n"
+          "%U\n"
+          "** Mål [/]\n- [ ] %?\n"
+          "** Faser\n*** Fas 1\n"
+          "** Risker och öppna frågor\n"))
+
 (with-eval-after-load 'org
   (setq org-capture-templates
         `(("i" "Inbox" entry (file ,nd/inbox-file)
@@ -1044,13 +1068,13 @@ cursor is already on a heading) so the TODO retains its context."
 
           ("p" "Project")
           ("ps" "Sigtuna" entry (file "~/org/gtd/sigtuna.org")
-           "* TODO %^{Title} %(nd/read-tags)\n%U\n%a\n%?")
+           ,(nd/project-template "sigtuna"))
           ("pv" "Veltric" entry (file "~/org/gtd/veltric.org")
-           "* TODO %^{Title} %(nd/read-tags)\n%U\n%a\n%?")
+           ,(nd/project-template "veltric"))
           ("pn" "Nordic" entry (file "~/org/gtd/nordic.org")
-           "* TODO %^{Title} %(nd/read-tags)\n%U\n%a\n%?")
+           ,(nd/project-template "nordic"))
           ("ph" "Home" entry (file "~/org/gtd/home.org")
-           "* TODO %^{Title} %(nd/read-tags)\n%U\n%a\n%?")
+           ,(nd/project-template "@home"))
 
           ("n" "Note" plain
            (file (lambda ()
@@ -1135,9 +1159,17 @@ cursor is already on a heading) so the TODO retains its context."
 (setq org-agenda-start-with-log-mode t
       org-agenda-block-separator 8411)
 
+;; A project is stuck when nothing beneath it is NEXT. ACTIVE is not in
+;; that list on purpose: it is a state of the PROJECT (second sequence in
+;; `org-todo-keywords'), not a next action, so it would mark every active
+;; project unstuck by itself. STARTED is gone — never a keyword here.
+;;
+;; HOLD and WAIT are excluded by the matcher rather than treated as
+;; stuck: a project parked deliberately is parked, not neglected, and
+;; reporting it every day is how a stuck list gets ignored.
 (setq org-stuck-projects
-      '("+project/-DONE-COMPLETED-CANC-VOID"
-        ("NEXT" "STARTED" "ACTIVE")
+      '("+project/-DONE-COMPLETED-CANC-HOLD-WAIT"
+        ("NEXT")
         nil ""))
 
 (with-eval-after-load 'org-agenda
@@ -1147,8 +1179,74 @@ cursor is already on a heading) so the TODO retains its context."
           ("project" ,(list (nerd-icons-faicon "nf-fa-briefcase")) nil nil :ascent center)
           ("inbox" ,(list (nerd-icons-faicon "nf-fa-inbox")) nil nil :ascent center))))
 
+;; Context scoping goes in a command's GLOBAL options, never per block:
+;; `org-agenda-tag-filter-preset' is documented as a property of the
+;; whole view, and setting it on one block of a block agenda is
+;; explicitly unreliable. It filters on the tags org records per agenda
+;; line, and those include INHERITED tags — so a project heading tagged
+;; :sigtuna: carries its whole action tree into the work view without
+;; every action having to repeat the tag. Scoping by TAG rather than by
+;; file is also what leaves gtd/ free to be one file or four.
+;;
+;; The same thing interactively is `f' (org-agenda-filter-by-tag) with
+;; the tag's key from `org-tag-persistent-alist' — f s for Sigtuna — and
+;; `F' to clear. evil-collection binds both; note it shadows org's other
+;; filter keys (< category, = regexp, ^ top headline) with evil motions.
+(defun nd/agenda-context (key desc tag &optional splits)
+  "An agenda custom command KEY/DESC showing only context TAG.
+SPLITS is a list of tag names to lift out of the task list into blocks
+of their own; the remaining-tasks block then excludes them."
+  `(,key ,desc
+         ((agenda ""
+                  ((org-agenda-span 14)
+                   (org-agenda-start-on-weekday nil)
+                   (org-agenda-skip-function
+                    '(org-agenda-skip-entry-if 'nottodo '("TODO" "NEXT")))))
+          (tags-todo "+project-someday"
+                     ((org-agenda-overriding-header "Projekt")
+                      (org-agenda-prefix-format "%i%l%l")
+                      (org-agenda-dim-blocked-tasks nil)))
+          ,@(mapcar (lambda (s)
+                      `(tags-todo ,(concat "+" s "-someday-project")
+                                  ((org-agenda-overriding-header ,(concat "Tasks – " s))
+                                   (org-agenda-prefix-format "%i%l%l"))))
+                    splits)
+          (tags-todo ,(concat "-project-someday"
+                              (mapconcat (lambda (s) (concat "-" s)) splits ""))
+                     ((org-agenda-overriding-header "Tasks – annat")
+                      (org-agenda-prefix-format "%i%l%l")))
+          (tags-todo "+someday"
+                     ((org-agenda-overriding-header "Someday")
+                      (org-agenda-prefix-format "%i%l%l"))))
+         ((org-agenda-tag-filter-preset '(,(concat "+" tag)))
+          (org-agenda-show-inherited-tags nil))))
+
 (setq org-agenda-custom-commands
-      '(("wd" "Work DONE"
+      (list
+       ;; One overview per context. Adding another is one line.
+       (nd/agenda-context "wo" "Work OVERVIEW (Sigtuna)" "sigtuna" '("RPA" "eTjänst"))
+       (nd/agenda-context "ho" "Home OVERVIEW" "@home")
+       (nd/agenda-context "no" "Nordic OVERVIEW" "nordic")
+       (nd/agenda-context "vo" "Veltric OVERVIEW" "veltric")
+
+       ;; Projects only, same scoping — no longer naming sigtuna.org, so
+       ;; it survives gtd/ being flattened.
+       '("wp" "Work PROJECTS"
+         ((tags-todo "+project-someday"
+                     ((org-agenda-overriding-header "PROJEKT")
+                      (org-agenda-prefix-format "%l%l")
+                      (org-agenda-dim-blocked-tasks nil))))
+         ((org-agenda-tag-filter-preset '("+sigtuna"))
+          (org-agenda-show-inherited-tags nil)))
+
+       ;; Left unscoped: a stuck project is worth seeing whichever
+       ;; context it belongs to. `f' narrows it if you want one.
+       '("ws" "Stuck projects" stuck "")
+
+       ;; File-scoped on purpose, both of them: archives and journal are
+       ;; reached by naming files, and a tag preset filters lines rather
+       ;; than choosing which files get scanned.
+       '("wd" "Work DONE"
          ((agenda ""
                   (;; A wildcard, not a list: org-agenda-file-regexp only
                    ;; matches .org, so an archive/ directory entry would
@@ -1160,16 +1258,7 @@ cursor is already on a heading) so the TODO retains its context."
                    (org-agenda-start-on-weekday nil)
                    (org-agenda-show-inherited-tags nil)))))
 
-        ("wp" "Work PROJECTS"
-         ((tags-todo "project+LEVEL=1-someday"
-                     ((org-agenda-files '("~/org/gtd/sigtuna.org"))
-                      (org-agenda-prefix-format "%l%l")
-                      (org-agenda-show-inherited-tags nil)
-                      (org-agenda-overriding-header "PROJEKT")))))
-
-        ("ws" "Stuck projects" stuck "")
-
-        ("wm" "JOURNAL OVERVIEW"
+       '("wm" "JOURNAL OVERVIEW"
          ((agenda ""
                   ((org-agenda-files '("~/org/journal/"))
                    (org-agenda-span 366)
@@ -1177,40 +1266,9 @@ cursor is already on a heading) so the TODO retains its context."
                    (org-agenda-start-on-weekday nil)
                    (org-agenda-show-inherited-tags nil)))))
 
-        ("wo" "Work OVERVIEW"
-         ((agenda ""
-                  ((org-agenda-span 14)
-                   (org-agenda-start-on-weekday nil)
-                   (org-agenda-skip-function '(org-agenda-skip-entry-if 'nottodo '("TODO")))
-                   (org-agenda-show-inherited-tags nil)))
-
-          (tags-todo "project+LEVEL=1-someday"
-                     ((org-agenda-overriding-header "Projekt")
-                      (org-agenda-prefix-format "%i%l%l")
-                      (org-agenda-show-inherited-tags nil)
-                      (org-agenda-dim-blocked-tasks nil)))
-
-          (tags-todo "+RPA-someday-project"
-                     ((org-agenda-overriding-header "Tasks - RPA")
-                      (org-agenda-prefix-format "%i%l%l")
-                      (org-agenda-show-inherited-tags nil)))
-
-          (tags-todo "+eTjänst-someday-project"
-                     ((org-agenda-overriding-header "Tasks - eTjänst")
-                      (org-agenda-prefix-format "%i%l%l")
-                      (org-agenda-show-inherited-tags nil)))
-
-          (tags-todo "-RPA-eTjänst-someday-project"
-                     ((org-agenda-overriding-header "Tasks - Annat")
-                      (org-agenda-prefix-format "%i%l%l")
-                      (org-agenda-show-inherited-tags nil)))
-
-          (tags-todo "+someday"
-                     ((org-agenda-overriding-header "Someday")
-                      (org-agenda-prefix-format "%i%l%l")
-                      (org-agenda-show-inherited-tags nil)))))
-
-        ("V" "Custom day agenda"
+       ;; Unscoped 7-day view across every context. Its "Urgent" block
+       ;; matches the `task' tag, which nothing in ~/org currently uses.
+       '("V" "Custom day agenda"
          ((agenda "" ((org-agenda-span 7)))
           (tags-todo "task"
                      ((org-agenda-overriding-header "Urgent")))))))
