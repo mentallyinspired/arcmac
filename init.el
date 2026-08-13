@@ -853,12 +853,32 @@ not deleted here and get cleaned up when /tmp is wiped at reboot."
 ;; project carries its whole action tree into that context's view.
 (setq org-tags-exclude-from-inheritance '("project"))
 
-(setq org-tag-persistent-alist '(("@home" . ?h)
+;; Persistent rather than `org-tag-alist': these stay available even in a
+;; file that declares its own #+tags:, and `nd/read-tags' — the capture
+;; prompt for jm/jw/ji — reads its candidates from this variable. Every
+;; selection key must be unique across the whole list; s/v/h were already
+;; taken, hence sitevision/VOF on shifted keys.
+(setq org-tag-persistent-alist '(;; contexts
+                                 ("@home" . ?h)
                                  ("sigtuna" . ?s)
                                  ("veltric" . ?v)
                                  ("nordic" . ?n)
                                  ("project" . ?p)
-                                 ("idee" . ?i)))
+                                 ;; work topics
+                                 ("eTjänst" . ?e)
+                                 ("digitalpost" . ?d)
+                                 ("sitevision" . ?S)
+                                 ("VOF" . ?V)
+                                 ("RPA" . ?R)
+                                 ("möte" . ?m)
+                                 ;; journal entry kinds
+                                 ("idee" . ?i)
+                                 ("joke" . ?j)
+                                 ("insults" . ?u)
+                                 ("original" . ?o)
+                                 ("philosophy" . ?f)
+                                 ("psychology" . ?y)
+                                 ("ethos" . ?t)))
 
 (setq org-tag-faces
       '(("project" . (:foreground "burlywood"))
@@ -1115,19 +1135,28 @@ be filtered to."
   :commands (org-journal-new-entry
              org-journal-open-current-journal-file
              org-journal-search)
-  ;; Journal files are extensionless (e.g. 20260101) and org-journal
-  ;; registers their mode association only once it's loaded — without
-  ;; this, a directly opened journal file lands in fundamental-mode
-  ;; (no org, no visual-fill-column, nothing).
-  :mode ("/org/journal/[0-9]\\{8\\}\\'" . org-journal-mode)
+  ;; org-journal identifies its files by a magic-mode-alist predicate on
+  ;; org-journal-dir, but that only exists once it's loaded — without
+  ;; this, a directly opened journal file lands in org-mode without the
+  ;; journal commands (and used to land in fundamental-mode entirely,
+  ;; back when these files carried no extension).
+  :mode ("/org/journal/[0-9]\\{4\\}\\.org\\'" . org-journal-mode)
   :init
-  ;; The default regexp only matches *.org, so ~/org/journal/ in
-  ;; org-agenda-files contributed NOTHING to the agenda (silently
-  ;; broken in Doom too — same default, same extensionless files).
-  (setq org-agenda-file-regexp "\\`[^.].*\\.org\\'\\|\\`[0-9]+\\'")
+  ;; file-format must name the files exactly as they sit on disk or a
+  ;; capture silently starts a SECOND file for the year. The upstream
+  ;; default (%Y%m%d) named yearly files after Jan 1 — 20260101 — which
+  ;; also kept them out of the agenda, since org-agenda-file-regexp only
+  ;; matches *.org. Naming them 2026.org drops both problems.
   (setq org-journal-dir "~/org/journal/"
         org-journal-date-format "%A, %Y %B %d"
-        org-journal-file-type 'yearly))
+        org-journal-file-format "%Y.org"
+        org-journal-file-type 'yearly
+        ;; Only inserted into a brand-new (empty) year file, so existing
+        ;; journals are never touched. No :ID: here — it has to be unique
+        ;; per file; org-id-get-create adds one on demand. A trailing
+        ;; blank line would be pointless: the date heading is inserted
+        ;; relative to the last #+ line, which eats it.
+        org-journal-file-header "#+title: Journal %Y\n#+startup: overview\n"))
 
 (defun nd/org-mode-visual-fill ()
   (setq visual-fill-column-width 140
@@ -1433,7 +1462,14 @@ of their own; the remaining-tasks block then excludes them."
     (kbd "<leader>mli") #'nd/attach-url-and-insert
     ;; the source block under point, in its own major mode
     (kbd "<leader>m'") #'org-edit-special
-    (kbd "<leader>me") #'org-export-dispatch))
+    (kbd "<leader>me") #'org-export-dispatch
+    ;; evil-collection binds <M-return> to outline-insert-heading in a
+    ;; normal-state aux map on outline-mode-map, and org-mode-map — which
+    ;; inherits it — remaps that to org-ctrl-c-ret ("org-table-hline-and-move
+    ;; or org-insert-heading"). No list branch, so Alt+Enter on a plain list
+    ;; item spliced a heading into the middle of the list. The terminal key
+    ;; M-RET was always fine; this makes the GUI key agree with it.
+    (kbd "M-<return>") #'org-meta-return))
 
 (with-eval-after-load 'org-agenda
   (evil-define-key '(normal visual) org-agenda-mode-map
