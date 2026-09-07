@@ -1300,6 +1300,113 @@ Ported verbatim from the Doom config — working production code.
         (cons (org-get-heading t t t t) (org-id-get)))
       "LEVEL=1"))))
 
+(defun nd/all-organization-roster ()
+  "Return (BREADCRUMB . ID) entries for organizations and nested units."
+  (with-current-buffer (find-file-noselect "~/org/ref/organizations.org")
+    (org-with-wide-buffer
+     (delq nil
+           (org-map-entries
+            (lambda ()
+              (when-let ((id (org-id-get)))
+                (cons (string-join (org-get-outline-path t t) " / ") id))))))))
+
+(defun nd/organization-heading-for-id (id)
+  "Return the heading text for ID in organizations.org."
+  (with-current-buffer (find-file-noselect "~/org/ref/organizations.org")
+    (org-with-wide-buffer
+     (when-let ((position (org-find-entry-with-id id)))
+       (goto-char position)
+       (org-get-heading t t t t)))))
+
+(defun nd/read-organizational-unit ()
+  "Prompt for any organization or nested unit and return its ID link."
+  (let* ((roster (nd/all-organization-roster))
+         (choice (completing-read "Organizational unit: "
+                                  (mapcar #'car roster) nil t)))
+    (if (string-empty-p choice)
+        ""
+      (let ((id (cdr (assoc choice roster))))
+        (format "[[id:%s][%s]]" id (nd/organization-heading-for-id id))))))
+
+(defun nd/org-id-from-link (link)
+  "Return the ID contained in an Org LINK string, or nil."
+  (when (and link (string-match "\\[\\[id:\\([^]]+\\)\\]" link))
+    (match-string 1 link)))
+
+(defun nd/organization-subtree-ids (id)
+  "Return ID and the IDs of every organizational unit nested below it."
+  (with-current-buffer (find-file-noselect "~/org/ref/organizations.org")
+    (org-with-wide-buffer
+     (goto-char (or (org-find-entry-with-id id)
+                    (user-error "Unknown organizational unit ID: %s" id)))
+     (save-restriction
+       (org-narrow-to-subtree)
+       (delq nil (org-map-entries #'org-id-get))))))
+
+(defun nd/list-contacts-by-org-unit ()
+  "List contacts assigned to a selected unit or anything below it."
+  (interactive)
+  (let* ((roster (nd/all-organization-roster))
+         (choice (completing-read "Organization or unit: "
+                                  (mapcar #'car roster) nil t))
+         (unit-ids (nd/organization-subtree-ids (cdr (assoc choice roster))))
+         contacts)
+    (with-current-buffer (find-file-noselect "~/org/ref/people.org")
+      (org-with-wide-buffer
+       (org-map-entries
+        (lambda ()
+          (when (member (nd/org-id-from-link (org-entry-get nil "ORG_UNIT"))
+                        unit-ids)
+            (push (cons (org-get-heading t t t t) (org-id-get)) contacts)))
+        "LEVEL=1")))
+    (with-current-buffer (get-buffer-create "*Contacts by organization*")
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert "#+title: Contacts — " choice "\n\n")
+        (dolist (contact (sort contacts (lambda (a b)
+                                          (string-collate-lessp (car a) (car b)))))
+          (insert (format "- [[id:%s][%s]]\n" (cdr contact) (car contact))))
+        (org-mode)
+        (goto-char (point-min))
+        (view-mode 1))
+      (pop-to-buffer (current-buffer)))))
+
+(defvar nd/capture-contact-name nil
+  "Name being used by the current Contact capture.")
+
+(defvar nd/capture-organization-name nil
+  "Name being used by the current Organization capture.")
+
+(defun nd/find-level-one-insertion-point (name)
+  "Move to the alphabetical level-1 insertion point for NAME."
+  (goto-char (point-min))
+  (let ((case-fold-search t)
+        found)
+    (while (and (not found) (re-search-forward "^\\* " nil t))
+      (let ((heading (org-get-heading t t t t)))
+        (when (string-collate-lessp name heading nil t)
+          (setq found (line-beginning-position)))))
+    (goto-char (or found (point-max)))))
+
+(defun nd/contact-find-location ()
+  "Prompt for a contact name and find its alphabetical insertion point."
+  (setq nd/capture-contact-name (read-string "Name: "))
+  (nd/find-level-one-insertion-point nd/capture-contact-name))
+
+(defun nd/organization-find-location ()
+  "Prompt for an organization name and find its alphabetical insertion point."
+  (setq nd/capture-organization-name (read-string "Organization name: "))
+  (nd/find-level-one-insertion-point nd/capture-organization-name))
+
+(defun nd/department-find-location ()
+  "Prompt for a unit and its parent, then move to the parent heading."
+  (setq nd/capture-organization-name (read-string "Unit name: "))
+  (let* ((roster (nd/all-organization-roster))
+         (parent (completing-read "Parent organization or unit: "
+                                  (mapcar #'car roster) nil t))
+         (id (cdr (assoc parent roster))))
+    (goto-char (org-find-entry-with-id id))))
+
 (defun nd/read-tags ()
   "Prompt for multiple tags via CRM from `org-tag-persistent-alist'.
 Returns tags wrapped as :tag1:tag2: or empty string if none picked."
@@ -1473,8 +1580,27 @@ be filtered to."
            ":PROPERTIES:\n:ID:       %(org-id-new)\n:END:\n#+TITLE: %^{Title}\n#+AUTHOR: %n\n#+DATE: %u\n\n%?"
            :unnarrowed t)
 
+          ("c" "Contact" entry
+           (file+function "~/org/ref/people.org" nd/contact-find-location)
+           "* %(progn nd/capture-contact-name)\n:PROPERTIES:\n:ID:         %(org-id-new)\n:context:    %^{Context||Sigtuna|private|veltric|nordic}\n:org_unit:   %(nd/read-organizational-unit)\n:position:   %^{Position}\n:email:      %^{Email}\n:tel_mobile: %^{Mobile}\n:END:\n%?"
+           :empty-lines 1
+           :insert-here t)
+
+          ("o" "Organization" entry
+           (file+function "~/org/ref/organizations.org"
+                          nd/organization-find-location)
+           "* %(progn nd/capture-organization-name)\n:PROPERTIES:\n:ID:        %(org-id-new)\n:unit_type: %^{Unit type||municipality|company|authority|association}\n:website:   %^{Website}\n:email:     %^{Email}\n:tel:       %^{Telephone}\n:END:\n%?"
+           :empty-lines 1
+           :insert-here t)
+
+          ("d" "Organizational unit" entry
+           (file+function "~/org/ref/organizations.org"
+                          nd/department-find-location)
+           "* %(progn nd/capture-organization-name)\n:PROPERTIES:\n:ID:        %(org-id-new)\n:unit_type: %^{Unit type||förvaltning|kontor|avdelning|enhet|team}\n:END:\n%?"
+           :empty-lines 1)
+
           ("jm" "Meeting" plain (function nd/org-journal-find-location)
-           "** %(format-time-string org-journal-time-format)%^{Title} %(nd/read-tags)\n:PROPERTIES:\n:ATTENDEES: %(nd/read-attendees)\n:END:\n- Agenda :: %?\n- Notes ::\n*** Actions\n")
+           "** %(format-time-string org-journal-time-format)%^{Title} %(nd/read-tags)\n:PROPERTIES:\n:ATTENDEES: %(nd/read-attendees)\n:ORG_UNIT:  %(nd/read-organizational-unit)\n:END:\n- Agenda :: %?\n- Notes ::\n*** Actions\n")
           ("jw" "Work log" plain (function nd/org-journal-find-location)
            "** %(format-time-string org-journal-time-format)%^{Title} %(nd/read-tags)\n- Done :: %?\n- Blockers ::\n")
           ("ji" "Idea" plain (function nd/org-journal-find-location)
