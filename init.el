@@ -1679,3 +1679,4 @@ of their own; the remaining-tasks block then excludes them."
     "SPC m c" "clock"
     "SPC m d" "dates"
     "SPC m l" "links"))
+(put 'narrow-to-region 'disabled nil)
