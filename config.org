@@ -170,7 +170,76 @@ runtime goes to XDG state instead.
       truncate-string-ellipsis "…")
 
 (add-hook 'prog-mode-hook #'display-line-numbers-mode)
-(add-hook 'before-save-hook #'delete-trailing-whitespace)
+#+end_src
+
+Org's idle auto-save must preserve the space after an unfinished list
+bullet, checkbox or heading. Keep whitespace cleanup for other modes,
+but do not trim Org buffers on either automatic or explicit saves.
+
+#+name: save-cleanup
+#+begin_src emacs-lisp
+(defun nd/delete-trailing-whitespace-except-org ()
+  "Clean trailing whitespace outside Org, preserving unfinished Org entries."
+  (unless (derived-mode-p 'org-mode)
+    (delete-trailing-whitespace)))
+
+;; Also replace the old hook when this block is loaded in a running session.
+(remove-hook 'before-save-hook #'delete-trailing-whitespace)
+(add-hook 'before-save-hook #'nd/delete-trailing-whitespace-except-org)
+#+end_src
+
+* Buffer management
+
+=SPC b i= groups buffers by purpose, including indirect project views
+with their source files. Unmatched files remain in Ibuffer's Default
+group. Names have a generous minimum width and no truncation limit.
+Grouping does not kill, save or hide buffers.
+
+#+name: buffer-management
+#+begin_src emacs-lisp
+(defun nd/buffer-category ()
+  "Return the current buffer's work category, following indirect buffers."
+  (with-current-buffer (or (buffer-base-buffer) (current-buffer))
+    (let* ((file (and buffer-file-name (expand-file-name buffer-file-name)))
+           (root (file-name-as-directory
+                  (expand-file-name (if (boundp 'org-directory)
+                                        org-directory "~/org/")))))
+      (cond
+       ((and file (or (equal file (concat root "inbox.org"))
+                      (string-prefix-p (concat root "gtd/") file))) 'tasks)
+       ((and file (string-prefix-p (concat root "journal/") file)) 'journals)
+       ((and file (string-prefix-p (concat root "notes/") file)) 'notes)
+       ((and file (string-prefix-p (concat root "ref/") file)) 'reference)
+       ((derived-mode-p 'nd/contacts-mode) 'reference)
+       ((null file) 'utilities)
+       ((or (derived-mode-p 'prog-mode)
+            (string-prefix-p (file-name-as-directory
+                              (expand-file-name user-emacs-directory)) file)) 'code)))))
+
+(defun nd/ibuffer-use-work-groups ()
+  "Group Ibuffer by work purpose and display full buffer names."
+  (setq-local ibuffer-formats
+              (mapcar
+               (lambda (format)
+                 (mapcar (lambda (column)
+                           (if (or (eq column 'name)
+                                   (and (consp column) (eq (car column) 'name)))
+                               '(name 48 -1 :left)
+                             column))
+                         format))
+               ibuffer-formats)
+              ibuffer-show-empty-filter-groups nil
+              ibuffer-filter-groups
+              '(("Tasks & projects" (predicate . (eq (nd/buffer-category) 'tasks)))
+                ("Journals" (predicate . (eq (nd/buffer-category) 'journals)))
+                ("Notes" (predicate . (eq (nd/buffer-category) 'notes)))
+                ("Reference" (predicate . (eq (nd/buffer-category) 'reference)))
+                ("Code & config" (predicate . (eq (nd/buffer-category) 'code)))
+                ("Utilities" (predicate . (eq (nd/buffer-category) 'utilities))))))
+
+(with-eval-after-load 'ibuffer
+  (require 'ibuf-ext)
+  (add-hook 'ibuffer-mode-hook #'nd/ibuffer-use-work-groups))
 #+end_src
 
 * WSL: browser handoff
@@ -1099,6 +1168,7 @@ unlike a directory a note can carry more than one.
 
 ** Settings
 
+#+name: org-settings
 #+begin_src emacs-lisp
 (use-package org
   :ensure nil
@@ -1108,6 +1178,9 @@ unlike a directory a note can carry more than one.
   (org-directory "~/org/")
   (calendar-week-start-day 1)
   (org-agenda-start-on-weekday 1)
+  ;; Keep neighbouring windows intact; q restores the pre-agenda layout.
+  (org-agenda-window-setup 'current-window)
+  (org-agenda-restore-windows-after-quit t)
   ;; One inbox, one file per context, and the journal. Directory
   ;; entries mean a new gtd file needs no config change.
   (org-agenda-files
@@ -1119,10 +1192,10 @@ unlike a directory a note can carry more than one.
   ;; archive/home.org_archive.
   (org-archive-location "~/org/archive/%s_archive::")
   (org-todo-keywords
-   '((sequence "TODO(t)" "NEXT(n)" "|" "DONE(d!)")
+   '((sequence "TODO(t)" "NEXT(n)" "WAIT(w@/!)" "|" "DONE(d!)" "CANC(k@)")
      (sequence "BACKLOG(b)" "PLAN(p)" "READY(r)" "ACTIVE(a)"
-               "REVIEW(v)" "WAIT(w@/!)" "HOLD(h)" "|"
-               "COMPLETED(c)" "CANC(k@)")))
+               "REVIEW(v)" "HOLD(h)" "|"
+               "COMPLETED(c)" "DROPPED(x@)")))
   (org-log-done 'time)
   (org-log-into-drawer t)
   ;; Drawers folded on visit. `org-cycle-hide-drawer-startup' is already t
@@ -1143,6 +1216,9 @@ unlike a directory a note can carry more than one.
   (org-startup-indented t)
   (org-indent-indentation-per-level 1)
   (org-treat-insert-todo-heading-as-state-change t)
+  ;; M-RET keeps a list item's text and children together.  Headings and
+  ;; table cells retain their usual splitting behaviour.
+  (org-M-RET-may-split-line '((item . nil) (default . t)))
   (org-table-convert-region-max-lines 20000)
   (org-image-actual-width nil)
   (org-imenu-depth 4)
@@ -1153,9 +1229,10 @@ unlike a directory a note can carry more than one.
      ("arch-wiki" . "https://wiki.archlinux.org/index.php/")
      ("wiki" . "https://en.wikipedia.org/wiki/")
      ("omap" . "https://nominatim.openstreetmap.org/search?q=%s&polygon=1")))
-  ;; Refile across all agenda files by full path; flex completion
-  ;; narrows "sig inbox" style just fine.
-  (org-refile-targets '((org-agenda-files :maxlevel . 3)))
+  ;; Keep clarified work in the domain files. Structural headings at any
+  ;; existing project depth are allowed; tasks and closed projects are not.
+  (org-refile-targets '((nd/org-domain-files :maxlevel . 6)))
+  (org-refile-target-verify-function #'nd/org-refile-target-p)
   (org-refile-use-outline-path 'full-file-path)
   (org-outline-path-complete-in-steps nil)
   (org-refile-allow-creating-parent-nodes 'confirm)
@@ -1174,6 +1251,7 @@ unlike a directory a note can carry more than one.
 =org-tag-persistent-alist= is load-bearing: =nd/read-tags= completes
 against it in every capture template.
 
+#+name: org-tags
 #+begin_src emacs-lisp
 ;; `project' marks the project heading and nothing else. Without this it
 ;; is inherited by every action inside the project, and then "-project"
@@ -1181,14 +1259,29 @@ against it in every capture template.
 ;; actions it exists to list. The context tags (@home/sigtuna/veltric/
 ;; nordic) are the opposite case: they SHOULD cascade, so tagging a
 ;; project carries its whole action tree into that context's view.
-(setq org-tags-exclude-from-inheritance '("project"))
+(setq org-tags-exclude-from-inheritance '("project" "focus" "meeting" "unprocessed"))
 
 (setq org-tag-persistent-alist '(("@home" . ?h)
                                  ("sigtuna" . ?s)
                                  ("veltric" . ?v)
                                  ("nordic" . ?n)
                                  ("project" . ?p)
-                                 ("idee" . ?i)))
+                                 ("focus" . ?F)
+                                 ("meeting" . ?M)
+                                 ("unprocessed" . ?U)
+                                 ("eTjänst" . ?e)
+                                 ("digitalpost" . ?d)
+                                 ("sitevision" . ?S)
+                                 ("VOF" . ?V)
+                                 ("RPA" . ?R)
+                                 ("möte" . ?m)
+                                 ("idee" . ?i)
+                                 ("joke" . ?j)
+                                 ("insults" . ?u)
+                                 ("original" . ?o)
+                                 ("philosophy" . ?f)
+                                 ("psychology" . ?y)
+                                 ("ethos" . ?t)))
 
 (setq org-tag-faces
       '(("project" . (:foreground "burlywood"))
@@ -1281,8 +1374,9 @@ exception, and prose files are where a ramp earns its keep.)
 
 ** Helpers
 
-Ported verbatim from the Doom config — working production code.
+Capture and filing helpers. Contact selectors live in the next section.
 
+#+name: org-helpers
 #+begin_src emacs-lisp
 (defun nd/org-journal-find-location ()
   "Open today's journal entry for capture without inserting a new heading."
@@ -1291,85 +1385,6 @@ Ported verbatim from the Doom config — working production code.
     (org-narrow-to-subtree))
   (goto-char (point-max)))
 
-(defun nd/people-roster ()
-  "Return an alist of (NAME . ID) for every level-1 heading in people.org."
-  (with-current-buffer (find-file-noselect "~/org/ref/people.org")
-    (org-with-wide-buffer
-     (org-map-entries
-      (lambda ()
-        (cons (org-get-heading t t t t) (org-id-get)))
-      "LEVEL=1"))))
-
-(defun nd/all-organization-roster ()
-  "Return (BREADCRUMB . ID) entries for organizations and nested units."
-  (with-current-buffer (find-file-noselect "~/org/ref/organizations.org")
-    (org-with-wide-buffer
-     (delq nil
-           (org-map-entries
-            (lambda ()
-              (when-let ((id (org-id-get)))
-                (cons (string-join (org-get-outline-path t t) " / ") id))))))))
-
-(defun nd/organization-heading-for-id (id)
-  "Return the heading text for ID in organizations.org."
-  (with-current-buffer (find-file-noselect "~/org/ref/organizations.org")
-    (org-with-wide-buffer
-     (when-let ((position (org-find-entry-with-id id)))
-       (goto-char position)
-       (org-get-heading t t t t)))))
-
-(defun nd/read-organizational-unit ()
-  "Prompt for any organization or nested unit and return its ID link."
-  (let* ((roster (nd/all-organization-roster))
-         (choice (completing-read "Organizational unit: "
-                                  (mapcar #'car roster) nil t)))
-    (if (string-empty-p choice)
-        ""
-      (let ((id (cdr (assoc choice roster))))
-        (format "[[id:%s][%s]]" id (nd/organization-heading-for-id id))))))
-
-(defun nd/org-id-from-link (link)
-  "Return the ID contained in an Org LINK string, or nil."
-  (when (and link (string-match "\\[\\[id:\\([^]]+\\)\\]" link))
-    (match-string 1 link)))
-
-(defun nd/organization-subtree-ids (id)
-  "Return ID and the IDs of every organizational unit nested below it."
-  (with-current-buffer (find-file-noselect "~/org/ref/organizations.org")
-    (org-with-wide-buffer
-     (goto-char (or (org-find-entry-with-id id)
-                    (user-error "Unknown organizational unit ID: %s" id)))
-     (save-restriction
-       (org-narrow-to-subtree)
-       (delq nil (org-map-entries #'org-id-get))))))
-
-(defun nd/list-contacts-by-org-unit ()
-  "List contacts assigned to a selected unit or anything below it."
-  (interactive)
-  (let* ((roster (nd/all-organization-roster))
-         (choice (completing-read "Organization or unit: "
-                                  (mapcar #'car roster) nil t))
-         (unit-ids (nd/organization-subtree-ids (cdr (assoc choice roster))))
-         contacts)
-    (with-current-buffer (find-file-noselect "~/org/ref/people.org")
-      (org-with-wide-buffer
-       (org-map-entries
-        (lambda ()
-          (when (member (nd/org-id-from-link (org-entry-get nil "ORG_UNIT"))
-                        unit-ids)
-            (push (cons (org-get-heading t t t t) (org-id-get)) contacts)))
-        "LEVEL=1")))
-    (with-current-buffer (get-buffer-create "*Contacts by organization*")
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert "#+title: Contacts — " choice "\n\n")
-        (dolist (contact (sort contacts (lambda (a b)
-                                          (string-collate-lessp (car a) (car b)))))
-          (insert (format "- [[id:%s][%s]]\n" (cdr contact) (car contact))))
-        (org-mode)
-        (goto-char (point-min))
-        (view-mode 1))
-      (pop-to-buffer (current-buffer)))))
 
 (defvar nd/capture-contact-name nil
   "Name being used by the current Contact capture.")
@@ -1390,7 +1405,14 @@ Ported verbatim from the Doom config — working production code.
 
 (defun nd/contact-find-location ()
   "Prompt for a contact name and find its alphabetical insertion point."
-  (setq nd/capture-contact-name (read-string "Name: "))
+  (setq nd/capture-contact-name (string-trim (read-string "Name: ")))
+  (when (string-empty-p nd/capture-contact-name) (user-error "A name is required"))
+  (when (and (seq-some (lambda (entry)
+                        (string-equal-ignore-case nd/capture-contact-name
+                                                  (plist-get entry :name)))
+                      (nd/contact-records))
+             (not (yes-or-no-p "This name already exists. Create another person? ")))
+    (user-error "Contact capture cancelled"))
   (nd/find-level-one-insertion-point nd/capture-contact-name))
 
 (defun nd/organization-find-location ()
@@ -1405,31 +1427,21 @@ Ported verbatim from the Doom config — working production code.
          (parent (completing-read "Parent organization or unit: "
                                   (mapcar #'car roster) nil t))
          (id (cdr (assoc parent roster))))
-    (goto-char (org-find-entry-with-id id))))
+    (unless id (user-error "Choose a parent unit"))
+    (goto-char (or (org-find-entry-with-id id) (user-error "Parent unit not found")))))
 
-(defun nd/read-tags ()
+(defun nd/read-tags (&rest required)
   "Prompt for multiple tags via CRM from `org-tag-persistent-alist'.
 Returns tags wrapped as :tag1:tag2: or empty string if none picked."
   (let* ((candidates (mapcar (lambda (pair)
                                (if (consp pair) (car pair) pair))
                              org-tag-persistent-alist))
-         (picked (completing-read-multiple "Tags: " candidates)))
+         (picked (delete-dups
+                  (append required (completing-read-multiple "Tags: " candidates)))))
     (if picked
         (concat ":" (string-join picked ":") ":")
       "")))
 
-(defun nd/read-attendees ()
-  "Prompt for attendees from people.org; return comma-separated id-links.
-Names not in the roster pass through as plain text."
-  (let* ((roster (nd/people-roster))
-         (picked (completing-read-multiple
-                  "Attendees: " (mapcar #'car roster))))
-    (mapconcat
-     (lambda (name)
-       (if-let ((id (cdr (assoc name roster))))
-           (format "[[id:%s][%s]]" id name)
-         name))
-     picked ", ")))
 
 (defvar nd/capture-default-title nil
   "Title captured by the Note capture template; reused in #+TITLE.")
@@ -1462,6 +1474,9 @@ time rather than filed into a context at capture time.")
 Adds a Backlink to the enclosing org entry (one level above, if the
 cursor is already on a heading) so the TODO retains its context."
   (interactive)
+  (when (and (save-excursion (beginning-of-line) (org-at-heading-p))
+             (org-get-todo-state))
+    (user-error "This is already a task; use SPC m r to refile the original"))
   (let* ((on-heading (save-excursion
                        (beginning-of-line)
                        (looking-at-p org-heading-regexp)))
@@ -1510,6 +1525,339 @@ cursor is already on a heading) so the TODO retains its context."
   (org-insert-last-stored-link 1))
 #+end_src
 
+** Contacts
+
+The two registries remain plain Org files. Headings are the canonical
+names; =ALIASES= contains whitespace-separated aliases (quote multiword
+aliases). Selectors retain IDs internally, including when names collide.
+The directory and focused person buffers use built-in Emacs facilities.
+
+#+name: org-contacts
+#+begin_src emacs-lisp
+(require 'tabulated-list)
+(require 'org-id)
+
+(defun nd/contact-file (organizations)
+  "Return the registry path, choosing organizations when ORGANIZATIONS is non-nil."
+  (expand-file-name (if organizations "ref/organizations.org" "ref/people.org")
+                    org-directory))
+
+(defun nd/contact-records (&optional organizations)
+  "Read registry records without changing IDs or moving the user's point.
+People are level-one headings; organizational units have UNIT_TYPE."
+  (with-current-buffer (find-file-noselect (nd/contact-file organizations))
+    (org-with-wide-buffer
+     (delq nil
+           (org-map-entries
+            (lambda ()
+              (when (if organizations (org-entry-get nil "UNIT_TYPE")
+                      (= (org-outline-level) 1))
+                (list :id (org-entry-get nil "ID")
+                      :name (org-get-heading t t t t)
+                      :path (string-join (org-get-outline-path t t) " / ")
+                      :aliases (condition-case nil
+                                   (split-string-and-unquote
+                                    (or (org-entry-get nil "ALIASES") ""))
+                                 (error nil))
+                      :context (or (org-entry-get nil "CONTEXT") "")
+                      :unit (or (org-entry-get nil "ORG_UNIT") "")
+                      :position (or (org-entry-get nil "POSITION") "")
+                      :email (or (org-entry-get nil "EMAIL") "")
+                      :phone (or (seq-find
+                                  (lambda (value) (and value (not (string-empty-p value))))
+                                  (mapcar (lambda (key) (org-entry-get nil key))
+                                          '("TEL_MOBILE" "TEL_WORK" "TEL"))) "")
+                      :review (org-entry-get nil "CONTACT_REVIEW")))))))))
+
+(defun nd/contact-candidates (records &optional organizations)
+  "Make unique completion labels mapped to RECORDS, including aliases.
+Use full IDs only when otherwise identical labels need disambiguation."
+  (let ((labels
+         (delq nil
+               (mapcar
+                (lambda (entry)
+                  (when (plist-get entry :id)
+                    (cons
+                     (replace-regexp-in-string
+                      "," ";"
+                      (concat
+                       (plist-get entry (if organizations :path :name))
+                       (when (plist-get entry :aliases)
+                         (format " [%s]" (string-join (plist-get entry :aliases) " / ")))
+                       (unless organizations
+                         (format " — %s / %s"
+                                 (plist-get entry :context)
+                                 (org-link-display-format (plist-get entry :unit))))))
+                     entry)))
+                records))))
+    (mapcar
+     (lambda (pair)
+       (cons (if (> (cl-count (car pair) labels :key #'car
+                             :test #'string-equal-ignore-case) 1)
+                 (format "%s <%s>" (car pair) (plist-get (cdr pair) :id))
+               (car pair))
+             (cdr pair)))
+     labels)))
+
+(defun nd/contact-resolve (choice candidates)
+  "Resolve a displayed CHOICE or an exact name/alias to one record.
+Unknown names return nil; ambiguous names require an explicit selection."
+  (or (cdr (assoc-string choice candidates t))
+      (let ((matches
+             (delete-dups
+              (mapcar #'cdr
+                      (seq-filter
+                       (lambda (pair)
+                         (member (downcase choice)
+                                 (mapcar #'downcase
+                                         (cons (plist-get (cdr pair) :name)
+                                               (plist-get (cdr pair) :aliases)))))
+                       candidates)))))
+        (when (> (length matches) 1)
+          (user-error "Ambiguous name: %s; choose the full directory label" choice))
+        (car matches))))
+
+(defun nd/people-roster ()
+  "Return unique alias-aware (LABEL . ID) contact choices."
+  (mapcar (lambda (pair) (cons (car pair) (plist-get (cdr pair) :id)))
+          (nd/contact-candidates (nd/contact-records))))
+
+(defun nd/all-organization-roster ()
+  "Return unique alias-aware (BREADCRUMB . ID) unit choices."
+  (mapcar (lambda (pair) (cons (car pair) (plist-get (cdr pair) :id)))
+          (nd/contact-candidates (nd/contact-records t) t)))
+
+(defun nd/organization-heading-for-id (id)
+  "Return the canonical organization heading for ID."
+  (plist-get (seq-find (lambda (entry) (equal id (plist-get entry :id)))
+                      (nd/contact-records t)) :name))
+
+(defun nd/org-id-from-link (link)
+  "Return the ID from an Org LINK string, or nil."
+  (when (and link (string-match "\\[\\[id:\\([^]]+\\)\\]" link))
+    (match-string 1 link)))
+
+(defun nd/read-organizational-unit ()
+  "Select a registered unit and return a canonical ID link; blank means none."
+  (let* ((candidates (nd/contact-candidates (nd/contact-records t) t))
+         (choice (completing-read "Organizational unit (optional): " candidates nil t))
+         (entry (cdr (assoc choice candidates))))
+    (if entry
+        (org-link-make-string (concat "id:" (plist-get entry :id))
+                              (plist-get entry :name))
+      "")))
+
+(defun nd/read-contact-context ()
+  "Read a lowercase context, suggesting both existing and usual values."
+  (downcase
+   (string-trim
+    (completing-read "Context (optional): "
+                     (delete-dups
+                      (append '("sigtuna" "private" "veltric" "nordic")
+                              (mapcar (lambda (entry) (plist-get entry :context))
+                                      (nd/contact-records)))))
+    "[: \t]+" "[: \t]+")))
+
+(defun nd/read-attendees ()
+  "Select attendees by name/alias, deduplicating IDs and keeping unknown names."
+  (let* ((candidates (nd/contact-candidates (nd/contact-records)))
+         (picked (completing-read-multiple "Attendees (comma-separated): " candidates))
+         seen links)
+    (dolist (raw picked)
+      (let* ((name (string-trim raw))
+             (entry (nd/contact-resolve name candidates))
+             (id (plist-get entry :id))
+             (key (if id (concat "id:" id) (concat "name:" (downcase name)))))
+        (unless (or (string-empty-p name) (member key seen))
+          (push key seen)
+          (push (if id (org-link-make-string (concat "id:" id) (plist-get entry :name))
+                  name)
+                links))))
+    (string-join (nreverse links) ", ")))
+
+(defun nd/organization-subtree-ids (id)
+  "Return IDs of the registered unit ID and its nested units."
+  (with-current-buffer (find-file-noselect (nd/contact-file t))
+    (org-with-wide-buffer
+     (goto-char (or (and id (org-find-entry-with-id id))
+                    (user-error "Choose an organizational unit")))
+     (save-restriction
+       (org-narrow-to-subtree)
+       (delq nil (org-map-entries
+                  (lambda () (when (org-entry-get nil "UNIT_TYPE") (org-id-get)))))))))
+
+(defvar-local nd/contacts-unit-ids nil)
+(defvar-local nd/contacts-context nil)
+(defvar-local nd/contact-view-id nil)
+
+(defun nd/contacts-refresh ()
+  "Refresh directory rows from the registries, retaining its filters."
+  (setq tabulated-list-entries
+        (delq nil
+              (mapcar
+               (lambda (entry)
+                 (when (and (plist-get entry :id)
+                            (or (null nd/contacts-unit-ids)
+                                (member (nd/org-id-from-link (plist-get entry :unit))
+                                        nd/contacts-unit-ids))
+                            (or (null nd/contacts-context)
+                                (equal nd/contacts-context (plist-get entry :context))))
+                   (list (plist-get entry :id)
+                         (vector (plist-get entry :name) (plist-get entry :position)
+                                 (org-link-display-format (plist-get entry :unit))
+                                 (plist-get entry :context) (plist-get entry :email)
+                                 (plist-get entry :phone)
+                                 (string-join (plist-get entry :aliases) " / ")))))
+               (nd/contact-records))))
+  (tabulated-list-print t))
+
+(define-derived-mode nd/contacts-mode tabulated-list-mode "Contacts"
+  "Contact directory. RET opens a person; h shows references; / filters context."
+  (setq tabulated-list-format [("Name" 26 t) ("Position" 26 t) ("Unit" 30 t)
+                               ("Context" 10 t) ("Email" 25 t) ("Phone" 18 t)
+                               ("Aliases" 20 t)]
+        tabulated-list-padding 1
+        tabulated-list-sort-key '("Name" . nil))
+  (add-hook 'tabulated-list-revert-hook #'nd/contacts-refresh nil t)
+  (tabulated-list-init-header))
+
+(defun nd/contacts (&optional unit-ids title)
+  "Open the contact directory, optionally limited to UNIT-IDS with TITLE."
+  (interactive)
+  (with-current-buffer (get-buffer-create "*Contacts*")
+    (nd/contacts-mode)
+    (setq nd/contacts-unit-ids unit-ids
+          mode-line-process (list (concat ": " (or title "All contacts"))))
+    (nd/contacts-refresh)
+    (pop-to-buffer-same-window (current-buffer))
+    (message "RET person · h history · / context · o unit · a all · g refresh")))
+
+(defun nd/contacts-filter-context ()
+  "Filter this directory by context, keeping its selected organization."
+  (interactive)
+  (let ((choice (completing-read
+                 "Context (blank for all): "
+                 (delete-dups (mapcar (lambda (entry) (plist-get entry :context))
+                                     (nd/contact-records))) nil t)))
+    (setq nd/contacts-context (unless (string-empty-p choice) choice))
+    (nd/contacts-refresh)
+    (message "Context: %s" (or nd/contacts-context "all"))))
+
+(defun nd/list-contacts-by-org-unit ()
+  "Open contacts belonging to a selected unit or any of its descendants."
+  (interactive)
+  (let* ((roster (nd/all-organization-roster))
+         (choice (completing-read "Organization or unit: " roster nil t)))
+    (nd/contacts (nd/organization-subtree-ids (cdr (assoc choice roster))) choice)))
+
+(defun nd/contact-current-id ()
+  "Return the selected directory/person/link ID when it identifies a contact."
+  (let ((id (cond ((derived-mode-p 'nd/contacts-mode) (tabulated-list-get-id))
+                  ((derived-mode-p 'org-mode)
+                   (or (let ((element (org-element-context)))
+                         (when (and (eq (org-element-type element) 'link)
+                                    (equal (org-element-property :type element) "id"))
+                           (org-element-property :path element)))
+                       (save-excursion
+                         (unless (org-before-first-heading-p)
+                           (org-back-to-heading t)
+                           (while (org-up-heading-safe))
+                           (org-entry-get nil "ID"))))))))
+    (when (seq-some (lambda (entry) (equal id (plist-get entry :id)))
+                    (nd/contact-records))
+      id)))
+
+(defun nd/contact-read-id ()
+  "Use the contact at point or prompt for an unambiguous contact."
+  (or (nd/contact-current-id)
+      (let* ((candidates (nd/contact-candidates (nd/contact-records)))
+             (choice (completing-read "Person: " candidates nil t))
+             (entry (cdr (assoc choice candidates))))
+        (or (plist-get entry :id) (user-error "Choose a person")))))
+
+(defun nd/contact-open (&optional id)
+  "Open/reuse a focused editable view of person ID, or choose a person."
+  (interactive)
+  (let* ((id (or id (nd/contact-read-id)))
+         (base (find-file-noselect (nd/contact-file nil)))
+         title start end view)
+    (with-current-buffer base
+      (org-with-wide-buffer
+       (goto-char (or (org-find-entry-with-id id) (user-error "Contact not found")))
+       (setq title (format "*Person: %s*" (org-get-heading t t t t))
+             start (point)
+             end (save-excursion (org-end-of-subtree t t) (point))
+             view (or (seq-find (lambda (buffer)
+                                  (and (eq (buffer-base-buffer buffer) base)
+                                       (equal (buffer-local-value 'nd/contact-view-id buffer) id)))
+                                (buffer-list))
+                      (clone-indirect-buffer title nil)))))
+    (with-current-buffer view
+      (setq-local nd/contact-view-id id)
+      (unless (equal title (buffer-name))
+        (rename-buffer (generate-new-buffer-name title (buffer-name))))
+      (widen)
+      (narrow-to-region start end)
+      (goto-char start)
+      (org-fold-show-subtree))
+    (pop-to-buffer-same-window view)
+    view))
+
+(defun nd/contact-history (&optional id)
+  "Find exact links to person ID in Org files and archives.
+This is reference history, not a claim that every mention is attendance.
+Search uses saved files; plain-text names cannot establish identity."
+  (interactive)
+  (require 'xref)
+  (let* ((id (or id (nd/contact-read-id)))
+         (pattern (regexp-quote (concat "[[id:" id "]")))
+         (files (directory-files-recursively org-directory "\\.org\\(?:_archive\\)?\\'")))
+    (xref-show-xrefs (lambda () (xref-matches-in-files pattern files)) nil)))
+
+(defun nd/contacts-check ()
+  "Report missing IDs, context, unresolved units and explicit review notes."
+  (interactive)
+  (let* ((units (nd/contact-records t))
+         (ids (mapcar (lambda (entry) (plist-get entry :id)) units))
+         rows)
+    (dolist (entry (nd/contact-records))
+      (let (issues)
+        (unless (plist-get entry :id) (push "Missing ID" issues))
+        (when (string-empty-p (plist-get entry :context)) (push "Context not set" issues))
+        (when (and (not (string-empty-p (plist-get entry :unit)))
+                   (not (member (nd/org-id-from-link (plist-get entry :unit)) ids)))
+          (push "ORG_UNIT is not a registered unit" issues))
+        (when (plist-get entry :review) (push (plist-get entry :review) issues))
+        (when issues
+          (push (format "- %s :: %s\n"
+                        (if (plist-get entry :id)
+                            (org-link-make-string (concat "id:" (plist-get entry :id))
+                                                  (plist-get entry :name))
+                          (plist-get entry :name))
+                        (string-join (nreverse issues) "; ")) rows))))
+    (with-current-buffer (get-buffer-create "*Contact checks*")
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert "#+title: Contact checks\n\n"
+                (if rows (apply #'concat (nreverse rows)) "No contact issues found.\n"))
+        (org-mode)
+        (goto-char (point-min))
+        (view-mode 1))
+      (pop-to-buffer-same-window (current-buffer)))))
+
+(dolist (binding '(("RET" . nd/contact-open) ("h" . nd/contact-history)
+                   ("/" . nd/contacts-filter-context) ("o" . nd/list-contacts-by-org-unit)
+                   ("a" . nd/contacts) ("g" . revert-buffer) ("q" . quit-window)))
+  (define-key nd/contacts-mode-map (kbd (car binding)) (cdr binding)))
+
+(with-eval-after-load 'evil
+  (evil-set-initial-state 'nd/contacts-mode 'normal)
+  (dolist (binding '(("RET" . nd/contact-open) ("h" . nd/contact-history)
+                     ("/" . nd/contacts-filter-context) ("o" . nd/list-contacts-by-org-unit)
+                     ("a" . nd/contacts) ("g" . revert-buffer) ("q" . quit-window)))
+    (evil-define-key 'normal nd/contacts-mode-map (kbd (car binding)) (cdr binding))))
+#+end_src
+
 ** Capture
 
 A captured project starts as a plan, not as a bare heading with an
@@ -1528,30 +1876,31 @@ items are invisible to every agenda matcher, so goals stay goals. The
 =[/]= cookie on the heading is the free part — org keeps the count, and
 org-modern draws it as a progress bar.
 
-Nothing in the config depends on this shape. =org-stuck-projects= scans
-a project's whole subtree for a =NEXT=, so actions can sit under a
-phase, under =Faser= directly, or under the project itself, and every
-agenda block keeps working. Phases are for thinking, not for queries.
+Actions can sit under a phase, under =Faser= directly, or under the
+project itself. Review checks the whole subtree for a NEXT or a WAIT
+with a scheduled follow-up. Each project has an ID and a short resume
+card above its existing detail. PLAN and HOLD remain available.
 
+#+name: org-capture
 #+begin_src emacs-lisp
 (defun nd/project-template (context)
   "Capture body for a new project in CONTEXT.
-PLAN, not TODO: projects take their state from the second sequence in
-`org-todo-keywords' (BACKLOG/PLAN/READY/ACTIVE/REVIEW/WAIT/HOLD), and
-their actions take TODO/NEXT from the first. Both tags are written in
+Projects take their state from the second sequence in
+`org-todo-keywords'; actions take TODO/NEXT/WAIT from the first. Tags are written in
 rather than prompted for — a project that is not tagged `project' is
 invisible to every agenda block, and one without its context tag cannot
 be filtered to."
   (concat "* PLAN %^{Project} :project:" context ":\n"
-          "%U\n"
-          "** Mål [/]\n- [ ] %?\n"
+          ":PROPERTIES:\n:ID: %(org-id-new)\n:END:\n"
+          "Klart när: \nNuläge: \nÅteruppta: %?\nUppdaterad: %U\n"
+          "** Mål [/]\n- [ ] \n"
           "** Faser\n*** Fas 1\n"
           "** Risker och öppna frågor\n"))
 
 (with-eval-after-load 'org
   (setq org-capture-templates
-        `(("i" "Inbox" entry (file ,nd/inbox-file)
-           "* TODO %? %(nd/read-tags)\n%U\n%a")
+        `(("i" "Inbox — clarify later" entry (file ,nd/inbox-file)
+           "* %? %(nd/read-tags)\n%U\n%a")
 
           ("p" "Project")
           ("ps" "Sigtuna" entry (file "~/org/gtd/sigtuna.org")
@@ -1581,40 +1930,34 @@ be filtered to."
            :unnarrowed t)
 
           ("c" "Contact" entry
-           (file+function "~/org/ref/people.org" nd/contact-find-location)
-           "* %(progn nd/capture-contact-name)\n:PROPERTIES:\n:ID:         %(org-id-new)\n:context:    %^{Context||Sigtuna|private|veltric|nordic}\n:org_unit:   %(nd/read-organizational-unit)\n:position:   %^{Position}\n:email:      %^{Email}\n:tel_mobile: %^{Mobile}\n:END:\n%?"
+           (file+function ,(nd/contact-file nil) nd/contact-find-location)
+           "* %(progn nd/capture-contact-name)\n:PROPERTIES:\n:ID:         %(org-id-new)\n:ALIASES:\n:CONTEXT:    %(nd/read-contact-context)\n:ORG_UNIT:   %(nd/read-organizational-unit)\n:POSITION:   %^{Position}\n:EMAIL:      %^{Email}\n:TEL_MOBILE: %^{Mobile}\n:END:\n%?"
            :empty-lines 1
            :insert-here t)
 
           ("o" "Organization" entry
-           (file+function "~/org/ref/organizations.org"
+           (file+function ,(nd/contact-file t)
                           nd/organization-find-location)
-           "* %(progn nd/capture-organization-name)\n:PROPERTIES:\n:ID:        %(org-id-new)\n:unit_type: %^{Unit type||municipality|company|authority|association}\n:website:   %^{Website}\n:email:     %^{Email}\n:tel:       %^{Telephone}\n:END:\n%?"
+           "* %(progn nd/capture-organization-name)\n:PROPERTIES:\n:ID:        %(org-id-new)\n:ALIASES:\n:UNIT_TYPE: %^{Unit type||municipality|company|authority|association|university}\n:WEBSITE:   %^{Website}\n:EMAIL:     %^{Email}\n:TEL:       %^{Telephone}\n:END:\n%?"
            :empty-lines 1
            :insert-here t)
 
           ("d" "Organizational unit" entry
-           (file+function "~/org/ref/organizations.org"
+           (file+function ,(nd/contact-file t)
                           nd/department-find-location)
-           "* %(progn nd/capture-organization-name)\n:PROPERTIES:\n:ID:        %(org-id-new)\n:unit_type: %^{Unit type||förvaltning|kontor|avdelning|enhet|team}\n:END:\n%?"
+           "* %(progn nd/capture-organization-name)\n:PROPERTIES:\n:ID:        %(org-id-new)\n:ALIASES:\n:UNIT_TYPE: %^{Unit type||förvaltning|kontor|avdelning|enhet|team}\n:END:\n%?"
            :empty-lines 1)
 
           ("jm" "Meeting" plain (function nd/org-journal-find-location)
-           "** %(format-time-string org-journal-time-format)%^{Title} %(nd/read-tags)\n:PROPERTIES:\n:ATTENDEES: %(nd/read-attendees)\n:ORG_UNIT:  %(nd/read-organizational-unit)\n:END:\n- Agenda :: %?\n- Notes ::\n*** Actions\n")
+           "** %(format-time-string org-journal-time-format)%^{Title} %(nd/read-tags \"meeting\" \"unprocessed\")\n:PROPERTIES:\n:ID: %(org-id-new)\n:ATTENDEES: %(nd/read-attendees)\n:ORG_UNIT:  %(nd/read-organizational-unit)\n:END:\n%U\nProject: %(nd/org-read-project-links)\n- Agenda :: %?\n- Notes ::\n- Decisions ::\n*** Actions\n")
           ("jw" "Work log" plain (function nd/org-journal-find-location)
            "** %(format-time-string org-journal-time-format)%^{Title} %(nd/read-tags)\n- Done :: %?\n- Blockers ::\n")
           ("ji" "Idea" plain (function nd/org-journal-find-location)
            "** %(format-time-string org-journal-time-format)%^{Title} :idee:\n%?")))
 
-  ;; Keep the org-id database current for anything captured under ~/org.
-  ;; (Doom also invalidated the projectile cache here — project.el needs
-  ;; no equivalent.)
-  (add-hook 'org-capture-after-finalize-hook
-            (lambda ()
-              (when (and (buffer-file-name)
-                         (string-prefix-p (expand-file-name "~/org/")
-                                          (buffer-file-name)))
-                (org-id-update-id-locations (list (buffer-file-name)))))))
+  ;; Org registers pasted/captured IDs itself. Do not rescan the initiating
+  ;; buffer from an after-finalize hook: that is not the capture target.
+  )
 #+end_src
 
 ** Journal
@@ -1628,19 +1971,15 @@ into today's entry via =nd/org-journal-find-location=.
   :commands (org-journal-new-entry
              org-journal-open-current-journal-file
              org-journal-search)
-  ;; Journal files are extensionless (e.g. 20260101) and org-journal
-  ;; registers their mode association only once it's loaded — without
-  ;; this, a directly opened journal file lands in fundamental-mode
-  ;; (no org, no visual-fill-column, nothing).
-  :mode ("/org/journal/[0-9]\\{8\\}\\'" . org-journal-mode)
+  ;; Match the existing yearly files and enable journal commands on visit.
+  :mode ("/org/journal/[0-9]\\{4\\}\\.org\\'" . org-journal-mode)
   :init
-  ;; The default regexp only matches *.org, so ~/org/journal/ in
-  ;; org-agenda-files contributed NOTHING to the agenda (silently
-  ;; broken in Doom too — same default, same extensionless files).
-  (setq org-agenda-file-regexp "\\`[^.].*\\.org\\'\\|\\`[0-9]+\\'")
+  ;; The upstream %Y%m%d default would create a second file for the year.
   (setq org-journal-dir "~/org/journal/"
         org-journal-date-format "%A, %Y %B %d"
-        org-journal-file-type 'yearly))
+        org-journal-file-format "%Y.org"
+        org-journal-file-type 'yearly
+        org-journal-file-header "#+title: Journal %Y\n#+startup: overview\n"))
 #+end_src
 
 ** Display and images
@@ -1674,129 +2013,424 @@ into today's entry via =nd/org-journal-find-location=.
   (setq org-attach-id-dir "~/org/attachments/"))
 #+end_src
 
+** Work system helpers
+
+These helpers share the existing =gtd/=, yearly journals and Org IDs.
+Project type is an explicit local tag; domain tags inherit from files.
+No query depends on a project having a particular heading depth or
+section name. All journals remain agenda sources until deliberately
+reviewed; meeting lookup discovers them independently on each invocation.
+
+#+name: org-workflow
+#+begin_src emacs-lisp
+(require 'org-id)
+(require 'org-agenda)
+(require 'org-element)
+(require 'seq)
+
+(defconst nd/org-project-states
+  '("BACKLOG" "PLAN" "READY" "ACTIVE" "REVIEW" "HOLD" "COMPLETED" "DROPPED"))
+(defconst nd/org-closed-project-states '("COMPLETED" "DROPPED" "DONE" "CANC"))
+
+(defun nd/org-domain-files ()
+  "Return the existing domain files under org-directory/gtd."
+  (let ((directory (expand-file-name "gtd/" org-directory)))
+    (when (file-directory-p directory)
+      (directory-files directory t "\\`[^.].*\\.org\\'"))))
+
+(defun nd/org-journal-files ()
+  "Discover all yearly journals independently of agenda membership."
+  (let ((directory (expand-file-name "journal/" org-directory)))
+    (when (file-directory-p directory)
+      (directory-files-recursively directory "\\.org\\'"))))
+
+(defun nd/org-local-project-p ()
+  "Whether this heading explicitly has the project tag."
+  (member "project" (org-get-tags nil t)))
+
+(defun nd/org-in-project-p (&optional states)
+  "Whether this entry has a project ancestor, optionally in STATES."
+  (save-match-data
+    (save-restriction
+      (widen)
+      (save-excursion
+        (org-back-to-heading t)
+        (catch 'found
+          (while t
+            (when (and (nd/org-local-project-p)
+                       (or (null states) (member (org-get-todo-state) states)))
+              (throw 'found t))
+            (unless (org-up-heading-safe) (throw 'found nil))))))))
+
+(defun nd/org-next-heading ()
+  "Return the next heading position, including children."
+  (save-excursion (outline-next-heading) (point)))
+
+(defun nd/org-hidden-entry-p ()
+  (or (org-in-archived-heading-p) (org-in-commented-heading-p)))
+
+(defun nd/org-skip-unavailable ()
+  "Skip action selection in held, backlog, finished or someday work."
+  (when (or (nd/org-hidden-entry-p)
+            (member "someday" (org-get-tags))
+            (nd/org-in-project-p
+             (append '("HOLD" "BACKLOG") nd/org-closed-project-states)))
+    (nd/org-next-heading)))
+
+(defun nd/org-skip-finished ()
+  "Keep dated obligations in held projects, but omit finished contexts."
+  (when (or (nd/org-hidden-entry-p)
+            (nd/org-in-project-p nd/org-closed-project-states))
+    (nd/org-next-heading)))
+
+(defun nd/org-skip-covered-project ()
+  "Keep active projects lacking NEXT or a WAIT with a follow-up date."
+  (when (or (nd/org-skip-unavailable)
+            (save-match-data
+              (save-excursion
+                (save-restriction
+                  (let ((org-agenda-skip-function nil)
+                        (org-agenda-skip-function-global nil))
+                    (catch 'covered
+                      (org-map-entries
+                       (lambda ()
+                         (when (and (not (nd/org-local-project-p))
+                                    (not (nd/org-skip-unavailable))
+                                    (or (equal (org-get-todo-state) "NEXT")
+                                        (and (equal (org-get-todo-state) "WAIT")
+                                             (org-entry-get nil "SCHEDULED"))))
+                           (throw 'covered t))) nil 'tree)
+                      nil))))))
+    (nd/org-next-heading)))
+
+(defun nd/org-skip-valid-project ()
+  "Keep project roots whose lifecycle state needs clarification."
+  (when (or (nd/org-hidden-entry-p)
+            (member (org-get-todo-state) nd/org-project-states))
+    (nd/org-next-heading)))
+
+(defun nd/org-skip-unless-residual ()
+  "Keep unfinished non-project entries inside finished projects."
+  (unless (and (not (nd/org-hidden-entry-p))
+               (not (nd/org-local-project-p))
+               (member (org-get-todo-state) org-not-done-keywords)
+               (nd/org-in-project-p nd/org-closed-project-states))
+    (nd/org-next-heading)))
+
+(defun nd/org-skip-project-task ()
+  "Keep standalone backlog entries, regardless of their heading depth."
+  (when (or (nd/org-in-project-p) (nd/org-skip-unavailable))
+    (nd/org-next-heading)))
+
+(defun nd/org-skip-dated-wait ()
+  "Keep waiting entries without a scheduled follow-up date."
+  (when (or (nd/org-skip-finished) (org-entry-get nil "SCHEDULED"))
+    (nd/org-next-heading)))
+
+(defun nd/org-skip-inbox-structure ()
+  "Keep open captures at the top level or under a domain heading."
+  (let ((level (org-outline-level))
+        (groups '("Sigtuna" "Home" "Nordic" "Veltric")))
+    (unless
+        (and (not (nd/org-hidden-entry-p))
+             (not (member (org-get-todo-state) org-done-keywords))
+             (or (and (= level 1)
+                      (not (member (org-get-heading t t t t) groups)))
+                 (and (= level 2)
+                      (save-excursion
+                        (org-up-heading-safe)
+                        (member (org-get-heading t t t t) groups)))))
+      (nd/org-next-heading))))
+
+(defun nd/org-refile-target-p ()
+  "Allow structural headings and open project roots as refile targets."
+  (and (not (nd/org-skip-finished))
+       (or (null (org-get-todo-state))
+           (and (nd/org-local-project-p)
+                (member (org-get-todo-state) org-not-done-keywords)))))
+
+(defun nd/org-project-marker ()
+  "Return a marker at the containing project, also from an agenda entry.
+Look outside any narrowing, without changing the source buffer's view."
+  (let ((marker (if (derived-mode-p 'org-agenda-mode)
+                    (or (org-get-at-bol 'org-hd-marker)
+                        (org-get-at-bol 'org-marker))
+                  (and (derived-mode-p 'org-mode) (point-marker)))))
+    (unless (and (markerp marker) (marker-buffer marker))
+      (user-error "Select a project or one of its tasks"))
+    (with-current-buffer (marker-buffer marker)
+      (save-restriction
+        (widen)
+        (save-excursion
+          (goto-char marker)
+          (org-back-to-heading t)
+          (while (and (not (nd/org-local-project-p)) (org-up-heading-safe)))
+          (unless (nd/org-local-project-p)
+            (user-error "No containing heading tagged :project:"))
+          (copy-marker (point)))))))
+
+(defun nd/org-project-at-point ()
+  "Read the containing project's (ID TITLE), also from an agenda entry."
+  (org-with-point-at (nd/org-project-marker)
+    (let ((id (org-entry-get nil "ID")))
+      (unless id (user-error "Create an ID on the project with SPC m I first"))
+      (list id (org-get-heading t t t t)))))
+
+(defvar-local nd/org-project-view-id nil
+  "Project ID identifying a reusable indirect project view.")
+
+(defun nd/org-open-project ()
+  "Open or reuse an indirect view of the containing project.
+Works from a project, one of its tasks, or an agenda entry.  Edits share
+the original file; point, narrowing and folding are independent.  Reuse
+is keyed by project ID and base buffer, not by the project title."
+  (interactive)
+  (let* ((marker (nd/org-project-marker))
+         (source (marker-buffer marker))
+         (base (or (buffer-base-buffer source) source))
+         id title start end view existing)
+    (with-current-buffer base
+      (save-excursion
+        (save-restriction
+          (widen)
+          (goto-char marker)
+          (setq id (org-entry-get nil "ID"))
+          (unless id (user-error "Create an ID on the project with SPC m I first"))
+          (setq title (format "*Project: %s / %s*"
+                              (if buffer-file-name (file-name-base buffer-file-name)
+                                (buffer-name))
+                              (org-get-heading t t t t))
+                start (point)
+                end (save-excursion (org-end-of-subtree t t) (point))
+                existing
+                (seq-find (lambda (buffer)
+                            (and (eq (buffer-base-buffer buffer) base)
+                                 (equal (buffer-local-value 'nd/org-project-view-id buffer)
+                                        id)))
+                          (buffer-list))
+                ;; Cloning runs Org's hook for independent folding state.
+                view (or existing (clone-indirect-buffer title nil))))))
+    (with-current-buffer view
+      (setq-local nd/org-project-view-id id)
+      (unless (equal (buffer-name) title)
+        (rename-buffer (generate-new-buffer-name title (buffer-name))))
+      (widen)
+      (narrow-to-region start end)
+      (unless existing
+        (goto-char start)
+        (org-fold-hide-subtree)
+        (org-fold-show-entry t)
+        (org-fold-show-children)))
+    (pop-to-buffer-same-window view)
+    view))
+
+(defun nd/org-entry-links-to-id-p (id)
+  "Match an actual ID link in this entry's body, before any children."
+  (save-match-data
+    (save-excursion
+      (save-restriction
+        (org-back-to-heading t)
+        (narrow-to-region (point) (nd/org-next-heading))
+        (org-element-map (org-element-parse-buffer) 'link
+          (lambda (link)
+            (and (equal (org-element-property :type link) "id")
+                 (equal (org-element-property :path link) id))) nil t)))))
+
+(defun nd/org-project-meetings ()
+  "Show meetings linking to this project across all yearly journals."
+  (interactive)
+  (let* ((project (nd/org-project-at-point))
+         (files (nd/org-journal-files)))
+    (require 'org-ql-search)
+    (unless files (user-error "No journals found"))
+    (org-ql-search files
+      `(and (tags-local "meeting") (nd/org-entry-links-to-id-p ,(car project)))
+      :narrow nil :super-groups nil :sort nil
+      :title (concat "Meetings — " (cadr project)))))
+
+(defun nd/org-read-project-links ()
+  "Select zero or more existing projects for a meeting capture."
+  (let (roster)
+    (dolist (file (nd/org-domain-files))
+      (with-current-buffer (find-file-noselect file)
+        (org-with-wide-buffer
+         (org-map-entries
+          (lambda ()
+            (when (and (nd/org-local-project-p) (not (nd/org-skip-finished)))
+              (when-let* ((id (org-entry-get nil "ID")))
+                (push (cons (format "%s / %s" (file-name-base file)
+                                    (org-get-heading t t t t)) id) roster)))) nil nil))))
+    (mapconcat
+     (lambda (name) (org-link-make-string
+                    (concat "id:" (cdr (assoc name roster))) name))
+     (completing-read-multiple "Projects (blank for none): " (nreverse roster) nil t)
+     ", ")))
+
+(defun nd/org-refresh-id-index ()
+  "Index notes, domain files, journals and archives without changing agenda scope."
+  (interactive)
+  (org-id-update-id-locations
+   (directory-files-recursively org-directory "\\.org\\(?:_archive\\)?\\'")))
+
+(defun nd/org-open-work-view (key)
+  "Open KEY across all domains, clearing old restrictions and filters."
+  (org-agenda-remove-restriction-lock t)
+  (let ((org-agenda-persistent-filter nil)) (org-agenda nil key)))
+
+(defun nd/org-today () (interactive) (nd/org-open-work-view "D"))
+(defun nd/org-next () (interactive) (nd/org-open-work-view "N"))
+(defun nd/org-projects () (interactive) (nd/org-open-work-view "P"))
+(defun nd/org-review () (interactive) (nd/org-open-work-view "R"))
+#+end_src
+
 ** Agenda
 
-Custom commands, stuck-project definition, and category icons —
-ported verbatim (live entries only; the Doom file's commented-out
-alternates were left behind).
+=D= opens today's commitments and available actions; =N= shows NEXT,
+=P= the project portfolio, =R= the weekly review and =W= all waiting.
+Existing context overview keys remain available. Calendar blocks retain
+appointments and WAIT follow-ups; HOLD affects action selection, not
+obligations. Review also detects undated WAITs and unfinished work under
+closed projects. Inbox and standalone queries support existing layouts.
 
 #+begin_src emacs-lisp
-(setq org-agenda-start-with-log-mode t
-      org-agenda-block-separator 8411)
-
-;; A project is stuck when nothing beneath it is NEXT. ACTIVE is not in
-;; that list on purpose: it is a state of the PROJECT (second sequence in
-;; `org-todo-keywords'), not a next action, so it would mark every active
-;; project unstuck by itself. STARTED is gone — never a keyword here.
-;;
-;; HOLD and WAIT are excluded by the matcher rather than treated as
-;; stuck: a project parked deliberately is parked, not neglected, and
-;; reporting it every day is how a stuck list gets ignored.
-(setq org-stuck-projects
-      '("+project/-DONE-COMPLETED-CANC-HOLD-WAIT"
-        ("NEXT")
-        nil ""))
-
 (with-eval-after-load 'org-agenda
   (require 'nerd-icons)
   (setq org-agenda-category-icon-alist
         `(("task" ,(list (nerd-icons-faicon "nf-fa-tasks")) nil nil :ascent center)
           ("project" ,(list (nerd-icons-faicon "nf-fa-briefcase")) nil nil :ascent center)
           ("inbox" ,(list (nerd-icons-faicon "nf-fa-inbox")) nil nil :ascent center))))
+#+end_src
 
-;; Context scoping goes in a command's GLOBAL options, never per block:
-;; `org-agenda-tag-filter-preset' is documented as a property of the
-;; whole view, and setting it on one block of a block agenda is
-;; explicitly unreliable. It filters on the tags org records per agenda
-;; line, and those include INHERITED tags — so a project heading tagged
-;; :sigtuna: carries its whole action tree into the work view without
-;; every action having to repeat the tag. Scoping by TAG rather than by
-;; file is also what leaves gtd/ free to be one file or four.
-;;
-;; The same thing interactively is `f' (org-agenda-filter-by-tag) with
-;; the tag's key from `org-tag-persistent-alist' — f s for Sigtuna — and
-;; `F' to clear. evil-collection binds both; note it shadows org's other
-;; filter keys (< category, = regexp, ^ top headline) with evil motions.
-(defun nd/agenda-context (key desc tag &optional splits)
-  "An agenda custom command KEY/DESC showing only context TAG.
-SPLITS is a list of tag names to lift out of the task list into blocks
-of their own; the remaining-tasks block then excludes them."
-  `(,key ,desc
-         ((agenda ""
-                  ((org-agenda-span 14)
-                   (org-agenda-start-on-weekday nil)
-                   (org-agenda-skip-function
-                    '(org-agenda-skip-entry-if 'nottodo '("TODO" "NEXT")))))
-          (tags-todo "+project-someday"
-                     ((org-agenda-overriding-header "Projekt")
-                      (org-agenda-prefix-format "%i%l%l")
-                      (org-agenda-dim-blocked-tasks nil)))
-          ,@(mapcar (lambda (s)
-                      `(tags-todo ,(concat "+" s "-someday-project")
-                                  ((org-agenda-overriding-header ,(concat "Tasks – " s))
-                                   (org-agenda-prefix-format "%i%l%l"))))
-                    splits)
-          (tags-todo ,(concat "-project-someday"
-                              (mapconcat (lambda (s) (concat "-" s)) splits ""))
-                     ((org-agenda-overriding-header "Tasks – annat")
-                      (org-agenda-prefix-format "%i%l%l")))
-          (tags-todo "+someday"
-                     ((org-agenda-overriding-header "Someday")
-                      (org-agenda-prefix-format "%i%l%l"))))
-         ((org-agenda-tag-filter-preset '(,(concat "+" tag)))
-          (org-agenda-show-inherited-tags nil))))
+#+name: org-work-agenda
+#+begin_src emacs-lisp
+(setq org-agenda-start-with-log-mode t
+      org-agenda-block-separator 8411)
+
+;; The built-in stuck command remains a rough fallback. The custom review
+;; below also checks WAIT dates and held/archived descendants.
+(setq org-stuck-projects '("+project/ACTIVE|REVIEW" ("NEXT" "WAIT") nil ""))
+
+(defun nd/org-next-block (&optional match title)
+  "An available-action block, optionally restricted by MATCH."
+  `(tags-todo ,(or match "-project/NEXT")
+     ((org-agenda-overriding-header ,(or title "NEXT — available actions"))
+      (org-agenda-tags-todo-honor-ignore-options t)
+      (org-agenda-todo-ignore-scheduled 'future)
+      (org-agenda-skip-function 'nd/org-skip-unavailable))))
+
+(defun nd/org-calendar-block (days)
+  "A calendar block for DAYS, including held projects' obligations."
+  `(agenda ""
+     ((org-agenda-span ,days)
+      (org-agenda-start-day nil)
+      (org-agenda-start-on-weekday nil)
+      (org-agenda-entry-types '(:deadline :scheduled :timestamp :sexp))
+      (org-agenda-skip-deadline-prewarning-if-scheduled nil)
+      (org-agenda-skip-function 'nd/org-skip-finished))))
+
+(defun nd/org-project-blocks ()
+  '((tags "project/ACTIVE|REVIEW"
+          ((org-agenda-overriding-header "Active projects")))
+    (tags "project/PLAN|READY|BACKLOG"
+          ((org-agenda-overriding-header "Planning and backlog")))
+    (tags "project/HOLD"
+          ((org-agenda-overriding-header "Held projects")))
+    (tags "project/COMPLETED|DROPPED|DONE|CANC"
+          ((org-agenda-overriding-header "Finished projects — reconcile, then archive")))
+    (tags "project"
+          ((org-agenda-skip-function 'nd/org-skip-valid-project)
+           (org-agenda-overriding-header "Projects needing a lifecycle state")))))
+
+(defun nd/org-review-blocks ()
+  `(,(nd/org-calendar-block 14)
+    (tags "LEVEL>0"
+          ((org-agenda-files (list (expand-file-name "inbox.org" org-directory)))
+           (org-agenda-skip-function 'nd/org-skip-inbox-structure)
+           (org-agenda-overriding-header "Inbox — clarify and refile")))
+    (tags-todo "-project/TODO"
+          ((org-agenda-files (nd/org-domain-files))
+           (org-agenda-skip-function 'nd/org-skip-project-task)
+           (org-agenda-overriding-header "Standalone backlog")))
+    (tags "project/ACTIVE|REVIEW"
+          ((org-agenda-skip-function 'nd/org-skip-covered-project)
+           (org-agenda-overriding-header "Active projects without NEXT or dated WAIT")))
+    (todo "WAIT"
+          ((org-agenda-skip-function 'nd/org-skip-dated-wait)
+           (org-agenda-overriding-header "WAIT without a follow-up date")))
+    (todo "WAIT"
+          ((org-agenda-skip-function 'nd/org-skip-finished)
+           (org-agenda-overriding-header "Waiting — check owner and follow-up")))
+    (alltodo ""
+          ((org-agenda-skip-function 'nd/org-skip-unless-residual)
+           (org-agenda-overriding-header "Open work under finished projects")))
+    (tags "project"
+          ((org-agenda-skip-function 'nd/org-skip-valid-project)
+           (org-agenda-overriding-header "Projects needing a lifecycle state")))
+    (tags "unprocessed"
+          ((org-agenda-files (nd/org-journal-files))
+           (org-agenda-overriding-header "Meetings still needing processing")))
+    (alltodo ""
+          ((org-agenda-files (nd/org-journal-files))
+           (org-agenda-overriding-header "Journal tasks — refile to a domain")))))
+
+(defconst nd/org-work-view-options
+  '((org-agenda-skip-function-global nil)
+    (org-agenda-skip-function nil)
+    (org-agenda-tag-filter-preset nil)
+    (org-agenda-category-filter-preset nil)
+    (org-agenda-todo-ignore-with-date nil)
+    (org-agenda-todo-ignore-scheduled nil)
+    (org-agenda-todo-ignore-deadlines nil)
+    (org-agenda-todo-ignore-timestamp nil)))
+
+(defun nd/agenda-context (key description tag)
+  "A domain overview with commitments, available actions and projects."
+  `(,key ,description
+     (,(nd/org-calendar-block 14)
+      ,(nd/org-next-block)
+      (todo "WAIT" ((org-agenda-skip-function 'nd/org-skip-finished)
+                    (org-agenda-overriding-header "Waiting")))
+      ,@(nd/org-project-blocks))
+     (,@(assq-delete-all 'org-agenda-tag-filter-preset
+                         (copy-tree nd/org-work-view-options))
+      (org-agenda-tag-filter-preset '(,(concat "+" tag)))
+      (org-agenda-show-inherited-tags nil))))
 
 (setq org-agenda-custom-commands
-      (list
-       ;; One overview per context. Adding another is one line.
-       (nd/agenda-context "wo" "Work OVERVIEW (Sigtuna)" "sigtuna" '("RPA" "eTjänst"))
-       (nd/agenda-context "ho" "Home OVERVIEW" "@home")
-       (nd/agenda-context "no" "Nordic OVERVIEW" "nordic")
-       (nd/agenda-context "vo" "Veltric OVERVIEW" "veltric")
-
-       ;; Projects only, same scoping — no longer naming sigtuna.org, so
-       ;; it survives gtd/ being flattened.
-       '("wp" "Work PROJECTS"
-         ((tags-todo "+project-someday"
-                     ((org-agenda-overriding-header "PROJEKT")
-                      (org-agenda-prefix-format "%l%l")
-                      (org-agenda-dim-blocked-tasks nil))))
-         ((org-agenda-tag-filter-preset '("+sigtuna"))
-          (org-agenda-show-inherited-tags nil)))
-
-       ;; Left unscoped: a stuck project is worth seeing whichever
-       ;; context it belongs to. `f' narrows it if you want one.
-       '("ws" "Stuck projects" stuck "")
-
-       ;; File-scoped on purpose, both of them: archives and journal are
-       ;; reached by naming files, and a tag preset filters lines rather
-       ;; than choosing which files get scanned.
-       '("wd" "Work DONE"
+      `(("D" "Today"
+         (,(nd/org-calendar-block 1)
+          ,(nd/org-next-block "focus-project/NEXT" "Focus — optional selected action")
+          ,(nd/org-next-block "-focus-project/NEXT"))
+         ,nd/org-work-view-options)
+        ("N" "Available NEXT actions" (,(nd/org-next-block)) ,nd/org-work-view-options)
+        ("P" "Project portfolio" ,(nd/org-project-blocks) ,nd/org-work-view-options)
+        ("R" "Weekly review" ,(nd/org-review-blocks) ,nd/org-work-view-options)
+        ("W" "Waiting"
+         ((todo "WAIT" ((org-agenda-skip-function 'nd/org-skip-finished))))
+         ,nd/org-work-view-options)
+        ,(nd/agenda-context "wo" "Work OVERVIEW (Sigtuna)" "sigtuna")
+        ,(nd/agenda-context "ho" "Home OVERVIEW" "@home")
+        ,(nd/agenda-context "no" "Nordic OVERVIEW" "nordic")
+        ,(nd/agenda-context "vo" "Veltric OVERVIEW" "veltric")
+        ("wp" "Work PROJECTS" ,(nd/org-project-blocks)
+         ((org-agenda-tag-filter-preset '("+sigtuna"))))
+        ("ws" "Projects without NEXT or dated WAIT"
+         ((tags "project/ACTIVE|REVIEW"
+                ((org-agenda-skip-function 'nd/org-skip-covered-project))))
+         ,nd/org-work-view-options)
+        ("wd" "Work DONE"
          ((agenda ""
-                  (;; A wildcard, not a list: org-agenda-file-regexp only
-                   ;; matches .org, so an archive/ directory entry would
-                   ;; find nothing.
-                   (org-agenda-files
-                    (file-expand-wildcards "~/org/archive/sigtuna*.org_archive"))
-                   (org-agenda-span 100)
-                   (org-agenda-start-day "-100d")
-                   (org-agenda-start-on-weekday nil)
-                   (org-agenda-show-inherited-tags nil)))))
-
-       '("wm" "JOURNAL OVERVIEW"
+           ((org-agenda-files
+             (file-expand-wildcards "~/org/archive/sigtuna*.org_archive"))
+            (org-agenda-span 100) (org-agenda-start-day "-100d")
+            (org-agenda-start-on-weekday nil)))))
+        ("wm" "JOURNAL OVERVIEW"
          ((agenda ""
-                  ((org-agenda-files '("~/org/journal/"))
-                   (org-agenda-span 366)
-                   (org-agenda-start-day "-365")
-                   (org-agenda-start-on-weekday nil)
-                   (org-agenda-show-inherited-tags nil)))))
-
-       ;; Unscoped 7-day view across every context. Its "Urgent" block
-       ;; matches the `task' tag, which nothing in ~/org currently uses.
-       '("V" "Custom day agenda"
-         ((agenda "" ((org-agenda-span 7)))
-          (tags-todo "task"
-                     ((org-agenda-overriding-header "Urgent")))))))
+           ((org-agenda-files (nd/org-journal-files))
+            (org-agenda-span 366) (org-agenda-start-day "-365")
+            (org-agenda-start-on-weekday nil)))))
+        ("V" "Week across all domains"
+         (,(nd/org-calendar-block 7)) ,nd/org-work-view-options)))
 #+end_src
 
 ** Dashboard queries (org-ql)
@@ -1805,6 +2439,7 @@ of their own; the remaining-tasks block then excludes them."
 =org-dblock-write:org-ql= with one change: headings render as id-links
 when the entry has an =:ID:=. Ported verbatim.
 
+#+name: org-dashboard
 #+begin_src emacs-lisp
 (with-eval-after-load 'org
   (require 'org-ql-search)
@@ -1944,6 +2579,9 @@ refiles. Two places deviate, both because this config got there first —
 =SPC m a= is =nd/action-to-inbox= (Doom's org-attach) and =SPC m B= is
 =org-babel-tangle=.
 
+=SPC m b= opens/reuses the containing project's indirect buffer, and
+=SPC m M= shows its journal meetings. Both work from Org and the agenda.
+
 The agenda gets the same letters through its own =org-agenda-*= command
 for each, so =SPC m d s= means "schedule this" whether the entry is in
 front of you in a file or in the agenda. Only the ones that mean
@@ -1958,10 +2596,12 @@ prefix. =org-agenda-show= moves to =g SPC=, which was unbound and sits
 with the other =g= movement keys evil-collection puts there. Plain
 =SPC= in emacs state is still stock org's =org-agenda-show-and-scroll-up=.
 
+#+name: org-keys
 #+begin_src emacs-lisp
 (with-eval-after-load 'org
   (evil-define-key '(normal visual) org-mode-map
     (kbd "<leader>ma") #'nd/action-to-inbox
+    (kbd "<leader>mb") #'nd/org-open-project
     (kbd "<leader>mB") #'org-babel-tangle
     ;; dates — the pair this map exists for
     (kbd "<leader>mds") #'org-schedule
@@ -1980,6 +2620,7 @@ with the other =g= movement keys evil-collection puts there. Plain
     ;; org-id-link-to-org-use-id is t, so a stored link needs an ID to
     ;; point at — this is how an entry gets one before it is linked to
     (kbd "<leader>mI") #'org-id-get-create
+    (kbd "<leader>mM") #'nd/org-project-meetings
     ;; clock
     (kbd "<leader>mci") #'org-clock-in
     (kbd "<leader>mco") #'org-clock-out
@@ -1993,7 +2634,9 @@ with the other =g= movement keys evil-collection puts there. Plain
     (kbd "<leader>mli") #'nd/attach-url-and-insert
     ;; the source block under point, in its own major mode
     (kbd "<leader>m'") #'org-edit-special
-    (kbd "<leader>me") #'org-export-dispatch))
+    (kbd "<leader>me") #'org-export-dispatch
+    ;; Preserve the GUI Alt+Enter fix: insert list items inside lists.
+    (kbd "M-<return>") #'org-meta-return))
 
 (with-eval-after-load 'org-agenda
   (evil-define-key '(normal visual) org-agenda-mode-map
@@ -2009,6 +2652,8 @@ with the other =g= movement keys evil-collection puts there. Plain
     (kbd "<leader>mr") #'org-agenda-refile
     (kbd "<leader>mo") #'org-agenda-set-property
     (kbd "<leader>mA") #'org-agenda-archive
+    (kbd "<leader>mb") #'nd/org-open-project
+    (kbd "<leader>mM") #'nd/org-project-meetings
     (kbd "<leader>mci") #'org-agenda-clock-in
     (kbd "<leader>mco") #'org-agenda-clock-out
     (kbd "<leader>mcc") #'org-agenda-clock-cancel
@@ -2063,6 +2708,15 @@ with the other =g= movement keys evil-collection puts there. Plain
     (kbd "<leader>nf") #'my/find-in-notes
     (kbd "<leader>n/") #'my/search-org
     (kbd "<leader>nR") #'consult-recoll
+    (kbd "<leader>nd") #'nd/org-today
+    (kbd "<leader>nn") #'nd/org-next
+    (kbd "<leader>np") #'nd/org-projects
+    (kbd "<leader>nr") #'nd/org-review
+    (kbd "<leader>ncd") #'nd/contacts
+    (kbd "<leader>ncp") #'nd/contact-open
+    (kbd "<leader>nco") #'nd/list-contacts-by-org-unit
+    (kbd "<leader>nch") #'nd/contact-history
+    (kbd "<leader>ncr") #'nd/contacts-check
     (kbd "<leader>njo") #'org-journal-open-current-journal-file
     (kbd "<leader>njn") #'org-journal-new-entry
     (kbd "<leader>njs") #'org-journal-search
@@ -2072,9 +2726,11 @@ with the other =g= movement keys evil-collection puts there. Plain
 
   (which-key-add-key-based-replacements
     "SPC n" "notes"
+    "SPC n c" "contacts"
     "SPC n j" "journal"
     "SPC m" "mode"
     "SPC m c" "clock"
     "SPC m d" "dates"
     "SPC m l" "links"))
+(put 'narrow-to-region 'disabled nil)
 #+end_src

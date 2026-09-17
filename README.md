@@ -94,6 +94,52 @@ Edit `config.org`, tangle (`C-c C-v t` inside Emacs, or the command in the
 file header), commit `config.org` together with both `.el` files.
 `nix flake check` runs the tangle check and `nixfmt` formatting check.
 
+It also runs the built-in Org workflow regression tests. To include the
+project-meeting query test using the installed `org-ql`, run:
+
+```sh
+emacs --batch --quick -l tests/org-workflow-test.el -f ert-run-tests-batch-and-exit
+```
+
+## Org work views
+
+`SPC n d` opens today's commitments and available actions, `SPC n n`
+the NEXT list, `SPC n p` the project portfolio, and `SPC n r` the weekly
+review. `SPC m M` shows a project's journal meetings from either Org or
+an agenda entry. The corresponding agenda keys are `D`, `N`, `P`, `R`
+and `W` (waiting); existing domain overview keys are retained.
+
+`SPC m b` opens a reusable, project-only buffer from Org or an agenda
+entry. It shares edits with the original file but keeps its own folding
+and cursor position. `SPC b d` closes the view; the source file stays open.
+`SPC b i` groups buffers into tasks/projects, journals, notes, reference,
+code/config and utilities. Agenda views use the current window, and `q`
+restores the previous window layout. Saving behaviour is unchanged.
+
+Domain tags inherit from `gtd/*.org`; `project`, `focus`, `meeting` and
+`unprocessed` are local entry tags. Meeting capture retains `org-journal`
+and the contact/unit selectors and adds project ID links. The detailed
+working guide lives in `~/org/notes/org-work-system.org`.
+
+## Contacts
+
+`SPC n c d` opens the contact directory, `SPC n c p` a focused person
+view, `SPC n c o` contacts in an organisation and its child units,
+`SPC n c h` the person's references in saved notes and archives, and
+`SPC n c r` contact details needing review.
+
+In the directory, `RET` opens a person, `h` opens history, `/` filters
+context, `o` selects a unit, `a` clears filters and `g` refreshes.
+Use `C-s` to search names, aliases or organisation names. Person views
+share edits with `ref/people.org`. History matches exact ID links;
+save recent edits before searching.
+
+Headings supply display names; `ALIASES` supports alternative names in
+selection, and `ORG_UNIT` links to `ref/organizations.org`. Meeting capture
+removes duplicate selections of the same person and keeps unknown guests
+as text. Conflicting names or employers remain in `CONTACT_REVIEW` until
+confirmed. Refresh dashboard tables with `C-u C-c C-x C-u`.
+
 ## License
 
 [MIT](LICENSE)

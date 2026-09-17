@@ -60,6 +60,19 @@
               touch "$out"
             '';
 
+        org-workflow =
+          pkgs.runCommand "org-workflow-check"
+            {
+              nativeBuildInputs = [ pkgs.emacs ];
+              src = self;
+            }
+            ''
+              emacs --batch --quick \
+                -l "$src/tests/org-workflow-test.el" \
+                -f ert-run-tests-batch-and-exit
+              touch "$out"
+            '';
+
         formatting =
           pkgs.runCommand "formatting-check"
             {

@@ -1,0 +1,573 @@
+;;; org-workflow-test.el --- Org workflow regressions -*- lexical-binding: t; -*-
+;; Run: emacs --batch --quick -l tests/org-workflow-test.el -f ert-run-tests-batch-and-exit
+(require 'ert)
+(require 'cl-lib)
+(require 'org)
+(require 'org-agenda)
+(require 'org-capture)
+(require 'ob-core)
+(require 'use-package)
+(require 'ibuffer)
+(require 'ibuf-ext)
+
+(defvar nd/test-root (make-temp-file "arcmac-org-tests-" t))
+(defvar my/state-dir nd/test-root)
+(defvar nd/inbox-file (expand-file-name "inbox.org" nd/test-root))
+(defconst nd/test-config
+  (expand-file-name "../config.org" (file-name-directory (or load-file-name buffer-file-name))))
+
+(defun nd/test-load-block (name)
+  (with-temp-buffer
+    (insert-file-contents nd/test-config)
+    (org-mode)
+    (goto-char (point-min))
+    (unless (search-forward (concat "#+name: " name "\n") nil t)
+      (error "Missing config block: %s" name))
+    (forward-line)
+    (let ((body (nth 1 (org-babel-get-src-block-info 'light))))
+      (with-temp-buffer
+        (insert ";;; -*- lexical-binding: t; -*-\n" body)
+        (eval-buffer)))))
+
+(dolist (name '("save-cleanup" "buffer-management" "org-workflow" "org-settings" "org-tags"
+               "org-work-agenda" "org-helpers" "org-contacts" "org-capture"))
+  (nd/test-load-block name))
+
+(setq org-directory nd/test-root
+      org-agenda-files (list nd/inbox-file (expand-file-name "gtd/" nd/test-root)
+                             (expand-file-name "journal/" nd/test-root))
+      org-id-locations-file (expand-file-name "ids" nd/test-root)
+      org-agenda-start-with-log-mode nil
+      org-overriding-default-time (encode-time 0 0 12 16 9 2026))
+
+(defun nd/test-agenda-at-fixture-date (function &rest args)
+  "Run agenda FUNCTION with today matching the dated fixtures."
+  ;; `org-overriding-default-time' controls date input, but not the
+  ;; `org-today' clock used for agenda ranges and future scheduling.
+  (cl-letf (((symbol-function 'org-today)
+             (lambda () (time-to-days org-overriding-default-time))))
+    (apply function args)))
+
+(advice-add 'org-agenda :around #'nd/test-agenda-at-fixture-date)
+
+(defun nd/test-file (name text)
+  (let ((file (expand-file-name name nd/test-root)))
+    (make-directory (file-name-directory file) t)
+    (with-temp-file file (insert text))
+    file))
+
+(nd/test-file "inbox.org" "* Sigtuna :sigtuna:\n** Old capture\n** DONE Resolved capture\n* New top-level capture :@home:\n")
+(nd/test-file "gtd/sigtuna.org"
+ "#+FILETAGS: :sigtuna:\n* Standalone tasks\n** TODO Loose backlog\n* ACTIVE Pilot :project:\n:PROPERTIES:\n:ID: pilot-id\n:END:\n** Faser\n*** NEXT Available action\n*** NEXT Future action\nSCHEDULED: <2026-09-23 Wed>\n*** Appointment\n<2026-09-16 Wed 10:00>\n* HOLD Held project :project:\n** NEXT Held action\n** WAIT Held follow-up\nSCHEDULED: <2026-09-16 Wed>\n** TODO Held obligation\nDEADLINE: <2026-09-17 Thu>\n* ACTIVE Undated waiting project :project:\n** WAIT Unmonitored wait\n* ACTIVE Monitored project :project:\n** WAIT Monitored wait\nSCHEDULED: <2026-09-23 Wed>\n* COMPLETED Closed project :project:\n** TODO Residual action\nSCHEDULED: <2026-09-16 Wed>\n* ACTIVE Archived-next project :project:\n** Archive :ARCHIVE:\n*** NEXT Archived action\n* Legacy root :project:\n* Responsibility\n** Section\n*** TODO Deep standalone\n")
+(nd/test-file "gtd/home.org" "#+FILETAGS: :@home:\n* Standalone tasks\n** NEXT Home action\n")
+(nd/test-file "journal/2025.org"
+ "* Historical meeting :meeting:\nProject: [[id:pilot-id][Pilot]]\n* Work log\nProject: [[id:pilot-id][Pilot]]\n")
+(nd/test-file "journal/2026.org"
+ "* Current meeting :meeting:unprocessed:\nProject: [[id:pilot-id][Pilot]]\n** TODO Journal action\n* Prefix collision :meeting:\nProject: [[id:pilot-id-extra][Another project]]\n* Child-only link :meeting:\n** Details\n[[id:pilot-id][Pilot]]\n* Literal example :meeting:\n#+begin_example\n[[id:pilot-id][Pilot]]\n#+end_example\n")
+
+(defmacro nd/test-with-contacts (&rest body)
+  "Run BODY in isolated registries, closing associated views afterwards."
+  (declare (indent 0) (debug t))
+  `(let ((org-directory (expand-file-name "contact-fixtures/" nd/test-root)))
+     (nd/test-file "contact-fixtures/ref/people.org"
+      "* Alex Example\n:PROPERTIES:\n:ID: person-a\n:ALIASES: Al \"A Example\"\n:CONTEXT: work\n:ORG_UNIT: [[id:team-id][Team]]\n:POSITION: Analyst\n:EMAIL: alex@example.invalid\n:TEL_MOBILE:\n:TEL_WORK: 123\n:END:\n** Notes\nShared notes.\n* Alex Example\n:PROPERTIES:\n:ID: person-b\n:CONTEXT: private\n:END:\n* Casey Sample\n:PROPERTIES:\n:ID: person-c\n:CONTEXT: work\n:ORG_UNIT: [[id:org-id][Example Org]]\n:END:\n* No ID\n")
+     (nd/test-file "contact-fixtures/ref/organizations.org"
+      "* Example Org\n:PROPERTIES:\n:ID: org-id\n:UNIT_TYPE: company\n:ALIASES: EO \"Example Company\"\n:END:\n** Team\n:PROPERTIES:\n:ID: team-id\n:UNIT_TYPE: team\n:ALIASES: Group\n:END:\n*** Background note\n:PROPERTIES:\n:ID: not-a-unit\n:END:\n")
+     (unwind-protect (save-window-excursion ,@body)
+       (dolist (buffer (buffer-list))
+         (when (buffer-live-p buffer)
+           (let* ((base (or (buffer-base-buffer buffer) buffer))
+                  (file (buffer-local-value 'buffer-file-name base)))
+             (when (and file (string-prefix-p org-directory file))
+               (with-current-buffer base (set-buffer-modified-p nil))
+               (kill-buffer buffer))))))))
+
+(ert-deftest nd/contacts-read-without-moving-point-or-narrowing ()
+  (nd/test-with-contacts
+    (with-current-buffer (find-file-noselect (nd/contact-file nil))
+      (goto-char (point-min))
+      (org-narrow-to-subtree)
+      (let ((start (point)) (end (point-max)))
+        (should (= 4 (length (nd/contact-records))))
+        (should (= start (point)))
+        (should (= end (point-max))))
+      (should (equal "123" (plist-get (car (nd/contact-records)) :phone))))))
+
+(ert-deftest nd/contacts-aliases-and-duplicate-names ()
+  (nd/test-with-contacts
+    (let* ((entries (nd/contact-records))
+           (candidates (nd/contact-candidates entries)))
+      (should (= 3 (length candidates)))
+      (should (equal "person-a" (plist-get (nd/contact-resolve "A Example" candidates) :id)))
+      (should (equal "person-a" (plist-get (nd/contact-resolve "al" candidates) :id)))
+      (should-error (nd/contact-resolve "Alex Example" candidates) :type 'user-error)
+      (should-not (nd/contact-resolve "Unknown guest" candidates))
+      (should (equal "person-b" (plist-get (nd/contact-resolve (caar (cdr candidates)) candidates) :id)))
+      (setf (plist-get (cadr entries) :context) "work"
+            (plist-get (cadr entries) :unit) "[[id:team-id][Team]]"
+            (plist-get (cadr entries) :aliases) '("Al" "A Example"))
+      (let ((labels (mapcar #'car (nd/contact-candidates entries))))
+        (should (= 3 (length (delete-dups labels))))
+        (should (string-match-p "person-a" (car labels)))))))
+
+(ert-deftest nd/contacts-attendees-canonicalize-deduplicate-and-keep-guests ()
+  (nd/test-with-contacts
+    (cl-letf (((symbol-function 'completing-read-multiple)
+               (lambda (&rest _) '("Al" "A Example" "Guest" " guest " ""))))
+      (should (equal "[[id:person-a][Alex Example]], Guest" (nd/read-attendees))))))
+
+(ert-deftest nd/contacts-units-use-aliases-and-only-real-units ()
+  (nd/test-with-contacts
+    (should (= 2 (length (nd/all-organization-roster))))
+    (should (string-match-p "Example Company" (caar (nd/all-organization-roster))))
+    (should (equal '("org-id" "team-id") (nd/organization-subtree-ids "org-id")))
+    (should-error (nd/organization-subtree-ids nil) :type 'user-error)
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (_prompt candidates &rest _) (caar candidates))))
+      (should (equal "[[id:org-id][Example Org]]" (nd/read-organizational-unit))))))
+
+(ert-deftest nd/contacts-context-normalization ()
+  (nd/test-with-contacts
+    (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) " :WORK: ")))
+      (should (equal "work" (nd/read-contact-context))))))
+
+(ert-deftest nd/contacts-directory-filter-and-refresh ()
+  (nd/test-with-contacts
+    (with-temp-buffer
+      (nd/contacts-mode)
+      (nd/contacts-refresh)
+      (should (= 3 (length tabulated-list-entries)))
+      (setq nd/contacts-unit-ids (nd/organization-subtree-ids "org-id"))
+      (nd/contacts-refresh)
+      (should (= 2 (length tabulated-list-entries)))
+      (setq nd/contacts-context "private")
+      (nd/contacts-refresh)
+      (should-not tabulated-list-entries)
+      (should (eq 'reference (nd/buffer-category))))))
+
+(ert-deftest nd/contacts-focused-view-reuses-and-shares-text ()
+  (nd/test-with-contacts
+    (let* ((first (nd/contact-open "person-a"))
+           (base (buffer-base-buffer first)))
+      (should (eq first (nd/contact-open "person-a")))
+      (with-current-buffer first
+        (should (buffer-narrowed-p))
+        (should (equal "person-a" (nd/contact-current-id)))
+        (should-not (string-match-p "Casey" (buffer-string)))
+        (goto-char (point-max))
+        (insert "A shared edit.\n"))
+      (with-current-buffer base
+        (should (string-match-p "A shared edit" (buffer-string)))))))
+
+(ert-deftest nd/contacts-history-exact-id-including-archives ()
+  (nd/test-with-contacts
+    (require 'xref)
+    (nd/test-file "contact-fixtures/journal/2026.org"
+                  "* Meeting\n:PROPERTIES:\n:ATTENDEES: [[id:person-a][Alex]]\n:END:\n[[id:person-a-extra][Different person]]\n")
+    (nd/test-file "contact-fixtures/archive/old.org_archive"
+                  "* Previous meeting\n[[id:person-a][Alex]]\n")
+    (cl-letf (((symbol-function 'xref-show-xrefs)
+               (lambda (fetcher _action)
+                 (let ((hits (funcall fetcher)))
+                   (should (= 2 (length hits)))
+                   (should (seq-some
+                            (lambda (hit)
+                              (string-suffix-p ".org_archive"
+                                               (xref-file-location-file (xref-item-location hit))))
+                            hits))))))
+      (nd/contact-history "person-a"))))
+
+(ert-deftest nd/contacts-templates-use-canonical-property-names ()
+  (let ((template (nth 4 (assoc "c" org-capture-templates))))
+    (dolist (property '("ALIASES" "CONTEXT" "ORG_UNIT" "POSITION" "EMAIL" "TEL_MOBILE"))
+      (should (string-search (concat ":" property ":") template)))
+    (should (string-search "nd/read-contact-context" template))
+    (should-not (string-search ":NAME:" template))))
+
+(ert-deftest nd/contacts-capture-registers-target-id-without-rescanning-source ()
+  (nd/test-with-contacts
+    (let ((org-capture-templates
+           (list (list "T" "Test contact" 'entry (list 'file (nd/contact-file nil))
+                       "* Captured person\n:PROPERTIES:\n:ID: captured-person\n:END:\n%?")))
+          (org-id-locations (make-hash-table :test 'equal))
+          (org-id-locations-file (expand-file-name "test-ids" org-directory))
+          (org-capture-after-finalize-hook nil))
+      (org-capture nil "T")
+      (org-capture-finalize)
+      (should (equal (file-truename (nd/contact-file nil))
+                     (file-truename (gethash "captured-person" org-id-locations)))))))
+
+(defun nd/test-view (key)
+  (switch-to-buffer "*scratch*")
+  (org-agenda nil key)
+  (with-current-buffer org-agenda-buffer-name
+    (save-excursion
+      (goto-char (point-min))
+      (let (lines)
+        (while (not (eobp))
+          (unless (invisible-p (point))
+            (push (buffer-substring-no-properties (line-beginning-position)
+                                                 (line-end-position)) lines))
+          (forward-line 1))
+        (mapconcat #'identity (nreverse lines) "\n")))))
+
+(defun nd/test-at (heading function)
+  (with-current-buffer (find-file-noselect (expand-file-name "gtd/sigtuna.org" nd/test-root))
+    (org-with-wide-buffer
+     (goto-char (point-min))
+     (search-forward heading)
+     (beginning-of-line)
+     (funcall function))))
+
+(ert-deftest nd/work-next-availability ()
+  (let ((view (nd/test-view "N")))
+    (should (string-match-p "Available action" view))
+    (should (string-match-p "Home action" view))
+    (dolist (excluded '("Future action" "Held action" "Archived action" "Residual action"))
+      (should-not (string-match-p excluded view)))))
+
+(ert-deftest nd/work-commitments-survive-hold-and-domain-filter ()
+  (dolist (key '("D" "wo"))
+    (let ((view (nd/test-view key)))
+      (dolist (included '("Appointment" "Held follow-up" "Held obligation"))
+        (should (string-match-p included view)))
+      (should-not (string-match-p "Residual action" view))))
+  (should-not (string-match-p "Home action" (nd/test-view "wo"))))
+
+(ert-deftest nd/work-review-preserves-all-capture-layouts ()
+  (let ((view (nd/test-view "R")))
+    (dolist (included '("Old capture" "New top-level capture" "Loose backlog"
+                        "Deep standalone" "Unmonitored wait" "Residual action"
+                        "Legacy root" "Current meeting" "Journal action"))
+      (should (string-match-p included view)))
+    (should-not (string-match-p "Resolved capture" view))))
+
+(ert-deftest nd/work-coverage-needs-a-dated-wait ()
+  (should (nd/test-at "* ACTIVE Pilot" #'nd/org-skip-covered-project))
+  (should (nd/test-at "* ACTIVE Monitored project" #'nd/org-skip-covered-project))
+  (should-not (nd/test-at "* ACTIVE Undated waiting project" #'nd/org-skip-covered-project))
+  (should-not (nd/test-at "* ACTIVE Archived-next project" #'nd/org-skip-covered-project)))
+
+(ert-deftest nd/work-project-type-does-not-inherit ()
+  (nd/test-at "*** NEXT Available action"
+              (lambda ()
+                (should (member "sigtuna" (org-get-tags)))
+                (should-not (member "project" (org-get-tags))))))
+
+(ert-deftest nd/work-refile-destinations ()
+  (should (nd/test-at "** Faser" #'nd/org-refile-target-p))
+  (should (nd/test-at "* HOLD Held project" #'nd/org-refile-target-p))
+  (should-not (nd/test-at "*** NEXT Available action" #'nd/org-refile-target-p))
+  (should-not (nd/test-at "* COMPLETED Closed project" #'nd/org-refile-target-p)))
+
+(ert-deftest nd/work-project-lookup-while-narrowed ()
+  (nd/test-at "*** NEXT Available action"
+              (lambda ()
+                (save-restriction
+                  (org-narrow-to-subtree)
+                  (should (equal (nd/org-project-at-point) '("pilot-id" "Pilot")))))))
+
+(ert-deftest nd/work-project-lookup-from-agenda ()
+  (nd/test-view "N")
+  (with-current-buffer org-agenda-buffer-name
+    (goto-char (point-min))
+    (re-search-forward "^ +sigtuna:.*NEXT Available action")
+    (should (equal (nd/org-project-at-point) '("pilot-id" "Pilot")))))
+
+(ert-deftest nd/work-meetings-match-exact-own-body-links ()
+  (skip-unless (require 'org-ql nil t))
+  (let ((org-ql-ask-unsafe-queries nil))
+    (should (equal
+             (sort (org-ql-select (nd/org-journal-files)
+                     '(and (tags-local "meeting") (nd/org-entry-links-to-id-p "pilot-id"))
+                     :action (lambda () (org-get-heading t t t t))) #'string<)
+             '("Current meeting" "Historical meeting")))))
+
+(ert-deftest nd/work-global-entry-clears-restrictions ()
+  (nd/test-at "* ACTIVE Pilot" (lambda () (org-agenda-set-restriction-lock 'subtree)))
+  (unwind-protect
+      (progn
+        (nd/org-today)
+        (should (string-match-p "Home action"
+                               (with-current-buffer org-agenda-buffer-name (buffer-string)))))
+    (org-agenda-remove-restriction-lock t)))
+
+(ert-deftest nd/work-capture-keeps-current-integrations ()
+  (should (equal (nth 3 (assoc "jm" org-capture-templates))
+                 '(function nd/org-journal-find-location)))
+  (let ((template (nth 4 (assoc "jm" org-capture-templates))))
+    (dolist (part '("nd/read-attendees" "nd/read-organizational-unit"
+                    "nd/org-read-project-links" "org-id-new" "unprocessed"))
+      (should (string-match-p part template))))
+  (should-not (string-prefix-p "* TODO" (nth 4 (assoc "i" org-capture-templates)))))
+
+(ert-deftest nd/work-task-and-project-states-are-separate ()
+  (should (member "WAIT(w@/!)" (car org-todo-keywords)))
+  (should-not (member "WAIT(w@/!)" (cadr org-todo-keywords)))
+  (should (member "PLAN(p)" (cadr org-todo-keywords)))
+  (should (member "HOLD(h)" (cadr org-todo-keywords))))
+
+(ert-deftest nd/edit-save-preserves-unfinished-org-entries ()
+  (should-not (memq #'delete-trailing-whitespace before-save-hook))
+  (dolist (text '("+ " "  - " "1. " "- [ ] " "* " "** " "*** TODO "))
+    (with-temp-buffer
+      (org-mode)
+      (insert text)
+      (let ((position (point)))
+        (run-hooks 'before-save-hook)
+        (should (= position (point)))
+        (should (equal text (buffer-string)))))))
+
+(ert-deftest nd/edit-save-still-cleans-non-org-buffers ()
+  (with-temp-buffer
+    (emacs-lisp-mode)
+    (insert "(message \"hello\")   \n")
+    (run-hooks 'before-save-hook)
+    (should (equal (buffer-string) "(message \"hello\")\n"))))
+
+(ert-deftest nd/edit-list-meta-return-keeps-whole-items ()
+  ;; The vertical bar marks point before M-RET.
+  (dolist (case '(("- Buy |milk and bread\n- Next item\n"
+                   "- Buy milk and bread\n- \n- Next item\n")
+                  ("- Parent |item\n  continuation text\n- Next item\n"
+                   "- Parent item\n  continuation text\n- \n- Next item\n")
+                  ("- Parent |item\n  - Child one\n  - Child two\n- Next item\n"
+                   "- Parent item\n  - Child one\n  - Child two\n- \n- Next item\n")
+                  ("- Parent item\n  - Child |one\n  - Child two\n"
+                   "- Parent item\n  - Child one\n  - \n  - Child two\n")
+                  ("- |Original item\n- Next item\n"
+                   "- \n- Original item\n- Next item\n")
+                  ("1. First |item\n2. Second\n"
+                   "1. First item\n2. \n3. Second\n")))
+    (with-temp-buffer
+      (org-mode)
+      (insert (car case))
+      (goto-char (point-min))
+      (search-forward "|")
+      (delete-char -1)
+      (org-meta-return)
+      (should (equal (buffer-string) (cadr case))))))
+
+(ert-deftest nd/edit-checkbox-insertion-keeps-item-text ()
+  (with-temp-buffer
+    (org-mode)
+    (insert "- [ ] Buy milk and bread\n")
+    (goto-char (point-min))
+    (search-forward "Buy ")
+    ;; M-S-RET uses the same no-splitting rule for a new checkbox.
+    (org-insert-todo-heading nil)
+    (should (equal (buffer-string) "- [ ] Buy milk and bread\n- [ ] \n"))))
+
+(ert-deftest nd/edit-meta-return-still-splits-headings-and-tables ()
+  (should (org-get-alist-option org-M-RET-may-split-line 'headline))
+  (should (org-get-alist-option org-M-RET-may-split-line 'table))
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Heading with remaining text\n")
+    (goto-char (point-min))
+    (search-forward "Heading ")
+    (org-meta-return)
+    (should (equal (buffer-string) "* Heading \n* with remaining text\n"))))
+
+(defmacro nd/test-with-project-buffer (&rest body)
+  "Run BODY with a disposable project file BASE and a place for VIEW."
+  (declare (indent 0) (debug t))
+  `(save-window-excursion
+     (let ((base (find-file-noselect
+                  (nd/test-file "view-fixtures/projects.org"
+                   "* ACTIVE Sample :project:\n:PROPERTIES:\n:ID: sample-id\n:END:\nResume card.\n** Section\n*** NEXT Task\nTask details.\n* ACTIVE Another :project:\n:PROPERTIES:\n:ID: another-id\n:END:\n** NEXT Other task\n")))
+           view)
+       (unwind-protect
+           (progn (switch-to-buffer base) (goto-char (point-min)) ,@body)
+         (dolist (buffer (buffer-list))
+           (when (eq (buffer-base-buffer buffer) base) (kill-buffer buffer)))
+         (when (buffer-live-p base)
+           (with-current-buffer base (set-buffer-modified-p nil))
+           (kill-buffer base))))))
+
+(ert-deftest nd/edit-auto-save-preserves-project-view-entry-spaces ()
+  (nd/test-with-project-buffer
+    (setq view (nd/org-open-project))
+    (goto-char (point-max))
+    (insert "** Draft\n+ \n** \n")
+    (backward-char)
+    (let ((position (point))
+          (make-backup-files nil))
+      ;; The idle auto-save timer calls save-some-buffers on file buffers.
+      ;; Restrict this test to the base file behind our indirect view.
+      (save-some-buffers t (lambda () (eq (current-buffer) base)))
+      (should (= position (point)))
+      (should-not (buffer-modified-p base))
+      (with-temp-buffer
+        (insert-file-contents (buffer-file-name base))
+        (should (search-forward "** Draft\n+ \n** \n" nil t))))))
+
+(ert-deftest nd/buffers-project-view-reuses-and-shares-edits ()
+  (nd/test-with-project-buffer
+    (search-forward "*** NEXT Task")
+    (beginning-of-line)
+    (org-narrow-to-subtree)
+    (let ((position (point)) (start (point-min)) (end (point-max)))
+      (setq view (nd/org-open-project))
+      (should (eq (current-buffer) view))
+      (should (eq (buffer-base-buffer) base))
+      (should (string-prefix-p "*Project: projects / Sample*" (buffer-name)))
+      (should (looking-at "\\* ACTIVE Sample"))
+      (should-not (string-match-p "Other task" (buffer-string)))
+      (with-current-buffer base
+        (should (= position (point)))
+        (should (= start (point-min)))
+        (should (= end (point-max))))
+      (search-forward "Task details.")
+      (let ((resume (point)))
+        (should (eq view (nd/org-open-project)))
+        (should (= resume (point))))
+      (insert " Shared edit.")
+      (with-current-buffer base
+        (should (string-match-p "Shared edit" (buffer-string)))
+        (should (buffer-modified-p)))
+      (should (= 1 (length (seq-filter (lambda (buffer)
+                                        (eq (buffer-base-buffer buffer) base))
+                                      (buffer-list)))))
+      (kill-buffer view)
+      (should (buffer-live-p base))
+      (with-current-buffer base
+        (should (buffer-modified-p))
+        (should (string-match-p "Shared edit" (buffer-string)))))))
+
+(ert-deftest nd/buffers-project-view-refreshes-title-and-bounds ()
+  (nd/test-with-project-buffer
+    (setq view (nd/org-open-project))
+    (with-current-buffer base
+      (goto-char (point-min))
+      (org-edit-headline "Renamed")
+      (search-forward "* ACTIVE Another")
+      (beginning-of-line)
+      (insert "** NEXT Added from source\n")
+      (goto-char (point-min))
+      (should (eq view (nd/org-open-project))))
+    (with-current-buffer view
+      (should (equal (buffer-name) "*Project: projects / Renamed*"))
+      (should (string-match-p "Added from source" (buffer-string)))
+      (should-not (string-match-p "Other task" (buffer-string))))
+    (with-current-buffer base
+      (goto-char (point-max))
+      (search-backward "** NEXT Other task")
+      (let ((other (nd/org-open-project)))
+        (should-not (eq other view))
+        (should (equal (buffer-local-value 'nd/org-project-view-id other) "another-id"))
+        (should (buffer-live-p view))))))
+
+(ert-deftest nd/buffers-project-folds-are-independent ()
+  (nd/test-with-project-buffer
+    (org-fold-hide-subtree)
+    (let ((card (save-excursion (search-forward "Resume card.") (point))))
+      (should (org-invisible-p card))
+      (setq view (nd/org-open-project))
+      (should-not (org-invisible-p card))
+      (with-current-buffer base (should (org-invisible-p card)))
+      (org-fold-show-all)
+      (with-current-buffer base (should (org-invisible-p card))))))
+
+(ert-deftest nd/buffers-project-views-distinguish-duplicate-titles ()
+  (nd/test-with-project-buffer
+    (setq view (nd/org-open-project))
+    (with-current-buffer base
+      (goto-char (point-max))
+      (search-backward "* ACTIVE Another")
+      (org-edit-headline "Sample")
+      (let* ((other (nd/org-open-project)) (name (buffer-name other)))
+        (should-not (eq other view))
+        (with-current-buffer other
+          (should (eq other (nd/org-open-project)))
+          (should (equal name (buffer-name))))))))
+
+(ert-deftest nd/buffers-project-view-from-agenda ()
+  (save-window-excursion
+    (nd/test-view "N")
+    (goto-char (point-min))
+    (re-search-forward "^ +sigtuna:.*NEXT Available action")
+    (let ((view (nd/org-open-project)))
+      (unwind-protect
+          (progn
+            (should (eq view (current-buffer)))
+            (should (equal nd/org-project-view-id "pilot-id"))
+            (should (eq (nd/buffer-category) 'tasks))
+            (should (string-match-p "Available action" (buffer-string)))
+            (should-not (string-match-p "Held action" (buffer-string))))
+        (kill-buffer view)))))
+
+(ert-deftest nd/buffers-project-view-refuses-missing-id-and-nonprojects ()
+  (with-temp-buffer
+    (org-mode)
+    (insert "* No project\n** TODO Task\n* Project without ID :project:\n")
+    (goto-char (point-min))
+    (should-error (nd/org-open-project) :type 'user-error)
+    (search-forward "Project without ID")
+    (let ((buffers (buffer-list)))
+      (should-error (nd/org-open-project) :type 'user-error)
+      (should (equal buffers (buffer-list))))
+    (should-not (org-entry-get nil "ID"))))
+
+(ert-deftest nd/buffers-agenda-preserves-and-restores-window-layout ()
+  (should (eq org-agenda-window-setup 'current-window))
+  (should org-agenda-restore-windows-after-quit)
+  (save-window-excursion
+    (delete-other-windows)
+    (switch-to-buffer "*scratch*")
+    (let* ((origin (selected-window))
+           (neighbour (split-window-right))
+           (reference (get-buffer-create " *agenda-window-test*")))
+      (unwind-protect
+          (progn
+            (set-window-buffer neighbour reference)
+            ;; Batch Emacs initially counts the minibuffer in root height.
+            ;; Normalize that once before comparing restored geometry.
+            (set-window-configuration (current-window-configuration))
+            (let ((layout (current-window-configuration)))
+              (nd/org-today)
+              (should (eq origin (selected-window)))
+              (should (= 2 (length (window-list))))
+              (should (eq reference (window-buffer neighbour)))
+              (org-agenda-quit)
+              (should (compare-window-configurations layout (current-window-configuration)))))
+        (kill-buffer reference)))))
+
+(ert-deftest nd/buffers-ibuffer-renders-full-project-names ()
+  (let ((project (generate-new-buffer
+                  "*Project: sigtuna / Ett långt projektnamn som är längre än fyrtioåtta tecken*")))
+    (unwind-protect
+        (with-temp-buffer
+          (ibuffer-mode)
+          (dotimes (format (length ibuffer-formats))
+            (setq ibuffer-current-format format)
+            (ibuffer-update nil t)
+            (goto-char (point-min))
+            (should (search-forward (buffer-name project) nil t))))
+      (kill-buffer project))))
+
+(ert-deftest nd/buffers-ibuffer-groups-by-purpose-without-dropping-files ()
+  (with-temp-buffer
+    (ibuffer-mode)
+    (should-not ibuffer-show-empty-filter-groups)
+    (let ((groups ibuffer-filter-groups)
+          (user-emacs-directory (expand-file-name "config/" nd/test-root)))
+      (dolist (spec '(("inbox.org" org-mode "Tasks & projects")
+                      ("gtd/sigtuna.org" org-mode "Tasks & projects")
+                      ("journal/2026.org" org-mode "Journals")
+                      ("notes/idea.org" org-mode "Notes")
+                      ("ref/templates/project.org" org-mode "Reference")
+                      ("config/config.org" org-mode "Code & config")
+                      ("src/test.el" emacs-lisp-mode "Code & config")
+                      (nil fundamental-mode "Utilities")
+                      ("notes-other/file.org" org-mode nil)
+                      ("archive/closed.org" org-mode nil)))
+        (with-temp-buffer
+          (funcall (nth 1 spec))
+          (setq buffer-file-name (and (car spec) (expand-file-name (car spec) nd/test-root)))
+          (let ((matches (seq-filter
+                          (lambda (group)
+                            (ibuffer-included-in-filters-p (current-buffer) (cdr group)))
+                          groups)))
+            (should (equal (mapcar #'car matches)
+                           (and (nth 2 spec) (list (nth 2 spec)))))))))))
