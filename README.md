@@ -118,8 +118,25 @@ restores the previous window layout. Saving behaviour is unchanged.
 
 Domain tags inherit from `gtd/*.org`; `project`, `focus`, `meeting` and
 `unprocessed` are local entry tags. Meeting capture retains `org-journal`
-and the contact/unit selectors and adds project ID links. The detailed
-working guide lives in `~/org/notes/org-work-system.org`.
+and the contact/unit selectors and adds project ID links.
+
+Use `SPC m r` (or `C-c C-w`) for ordinary refiling without adding links.
+Use `SPC m R` to refile with meeting links, in Org or the agenda. The
+task gets a `Backlink:` to its enclosing `:meeting:` entry, and a linked
+heading replaces it at its original position and outline level. This also
+works from the agenda and for multiple selected tasks. Moving the whole
+Actions section leaves a linked Actions heading in its place; moving the
+whole meeting keeps it intact. Existing task backlinks are reused, and
+other references in the meeting are preserved. IDs keep links working
+through later refiles. The replacement heading has no TODO state or
+duplicate ID property; follow its link to see the current task.
+Copying, navigation and cancelled refiles do not add links. `SPC m a`
+remains the prose-to-inbox command with its existing meeting backlink.
+
+Follow file links and ID backlinks with `C-c C-o` in the current window;
+use `C-c &` to return from an ID backlink.
+
+The detailed working guide lives in `~/org/notes/org-work-system.org`.
 
 ## Contacts
 

@@ -30,7 +30,7 @@
         (eval-buffer)))))
 
 (dolist (name '("save-cleanup" "buffer-management" "org-workflow" "org-settings" "org-tags"
-               "org-work-agenda" "org-helpers" "org-contacts" "org-capture"))
+               "org-work-agenda" "org-helpers" "org-meeting-refile" "org-contacts" "org-capture"))
   (nd/test-load-block name))
 
 (setq org-directory nd/test-root
@@ -259,6 +259,309 @@
   (should (nd/test-at "* HOLD Held project" #'nd/org-refile-target-p))
   (should-not (nd/test-at "*** NEXT Available action" #'nd/org-refile-target-p))
   (should-not (nd/test-at "* COMPLETED Closed project" #'nd/org-refile-target-p)))
+
+(defmacro nd/test-with-meeting-refile (journal &rest body)
+  "Run BODY with isolated JOURNAL, source, target and other project buffers."
+  (declare (indent 1) (debug t))
+  `(let* ((org-directory (make-temp-file (expand-file-name "refile-" nd/test-root) t))
+          (org-id-locations (make-hash-table :test 'equal))
+          (org-id-files nil)
+          (org-id-locations-file (expand-file-name "ids" org-directory))
+          (org-bookmark-names-plist nil)
+          (org-log-refile nil)
+          (org-after-refile-insert-hook nil)
+          (source (find-file-noselect
+                   (nd/test-file (expand-file-name "journal/2026.org" org-directory)
+                                 ,journal)))
+          (target (find-file-noselect
+                   (nd/test-file (expand-file-name "gtd/work.org" org-directory)
+                                 "* ACTIVE Project :project:\n** Tasks\n")))
+          (other (find-file-noselect
+                  (nd/test-file (expand-file-name "gtd/other.org" org-directory)
+                                "* ACTIVE Other project :project:\n")))
+          (org-agenda-files (mapcar #'buffer-file-name (list source target other))))
+     (unwind-protect
+         (save-window-excursion ,@body)
+       (dolist (buffer (list source target other))
+         (when (buffer-live-p buffer)
+           (with-current-buffer buffer (set-buffer-modified-p nil))
+           (kill-buffer buffer))))))
+
+(defun nd/test-heading (title)
+  "Go to the heading named TITLE in the current buffer."
+  (goto-char (point-min))
+  (catch 'found
+    (while (re-search-forward org-heading-regexp nil t)
+      (beginning-of-line)
+      (when (equal title (org-get-heading t t t t)) (throw 'found (point)))
+      (forward-line))
+    (error "No heading named %s" title)))
+
+(defun nd/test-refile-location (buffer title)
+  (with-current-buffer buffer
+    (list title (buffer-file-name) nil (nd/test-heading title))))
+
+(defun nd/test-refile-link-heading (id)
+  "Find the plain heading linking to ID in the current buffer."
+  (goto-char (point-min))
+  (should (re-search-forward (concat "^\\*+ " (regexp-quote (concat "[[id:" id "]["))) nil t))
+  (beginning-of-line)
+  (should-not (org-get-todo-state))
+  (should-not (org-id-get))
+  (point))
+
+(ert-deftest nd/refile-normal-command-does-not-add-meeting-links ()
+  (dolist (view '(org agenda))
+    (nd/test-with-meeting-refile
+        "* Friday\n** Meeting :meeting:\n*** TODO Action\nDetails.\n*** TODO Later\n"
+      (if (eq view 'org)
+          (with-current-buffer source
+            (nd/test-heading "Action")
+            (org-refile nil nil (nd/test-refile-location target "Tasks")))
+        (org-agenda nil "t")
+        (with-current-buffer org-agenda-buffer-name
+          (goto-char (point-min))
+          (search-forward "TODO Action")
+          (org-agenda-refile nil (nd/test-refile-location target "Tasks") t)))
+      (with-current-buffer source
+        (should (equal (buffer-string) "* Friday\n** Meeting :meeting:\n*** TODO Later\n")))
+      (with-current-buffer target
+        (nd/test-heading "Action")
+        (should (equal "TODO" (org-get-todo-state)))
+        (should (string-match-p "Details." (buffer-string))))
+      (dolist (buffer (list source target))
+        (with-current-buffer buffer
+          (should-not (string-match-p "Backlink:\\|:ID:\\|\\[\\[id:" (buffer-string))))))))
+
+(ert-deftest nd/refile-meeting-links-preserve-task-and-source-outline ()
+  (nd/test-with-meeting-refile
+      "* Friday\n** Planning meeting :meeting:\n:PROPERTIES:\n:ID: meeting-id\n:END:\nDecisions.\n*** Actions\nAction notes.\n**** TODO Before\nKeep this body.\n**** NEXT Send proposal\nSCHEDULED: <2026-09-21 Mon>\n:PROPERTIES:\n:ID: task-id\n:END:\n:LOGBOOK:\nExisting history.\n:END:\nTask details.\n***** TODO Check figures\n**** TODO After\nKeep this too.\n"
+    (with-current-buffer source
+      (nd/test-heading "Send proposal")
+      (save-restriction
+        (org-narrow-to-subtree)
+        (nd/org-refile-with-meeting-links nil nil (nd/test-refile-location target "Tasks")))
+      (should (equal (buffer-string)
+                     "* Friday\n** Planning meeting :meeting:\n:PROPERTIES:\n:ID: meeting-id\n:END:\nDecisions.\n*** Actions\nAction notes.\n**** TODO Before\nKeep this body.\n**** [[id:task-id][Send proposal]]\n**** TODO After\nKeep this too.\n"))
+      (nd/test-refile-link-heading "task-id")
+      (should (= 4 (org-outline-level))))
+    (with-current-buffer target
+      (nd/test-heading "Send proposal")
+      (should (equal "task-id" (org-entry-get nil "ID")))
+      (should (equal "NEXT" (org-get-todo-state)))
+      (should (equal "<2026-09-21 Mon>" (org-entry-get nil "SCHEDULED")))
+      (should (nd/org-entry-links-to-id-p "meeting-id"))
+      (should (string-match-p "Existing history." (buffer-string)))
+      (should (string-match-p "Task details." (buffer-string)))
+      (nd/test-heading "Check figures")
+      (should (equal 4 (org-outline-level))))
+    (should (equal (file-truename (buffer-file-name target))
+                   (file-truename (gethash "task-id" org-id-locations))))))
+
+(ert-deftest nd/refile-creates-missing-ids-and-retains-links-on-later-moves ()
+  (nd/test-with-meeting-refile
+      "* Friday\n** Meeting :meeting:\n*** Actions\n**** TODO Follow up\n"
+    (with-current-buffer source
+      (nd/test-heading "Follow up")
+      (nd/org-refile-with-meeting-links nil nil (nd/test-refile-location target "Tasks")))
+    (let ((meeting-id (with-current-buffer source
+                        (nd/test-heading "Meeting") (org-id-get)))
+          (task-id (with-current-buffer target
+                     (nd/test-heading "Follow up") (org-id-get)))
+          (journal-text (with-current-buffer source (buffer-string))))
+      (should meeting-id)
+      (should task-id)
+      (with-current-buffer target
+        (should (nd/org-entry-links-to-id-p meeting-id))
+        (org-refile nil nil (nd/test-refile-location other "Other project"))
+        (should-not (string-match-p "\\[\\[id:" (buffer-string))))
+      (with-current-buffer other
+        (nd/test-heading "Follow up")
+        (should (equal task-id (org-id-get)))
+        (should (nd/org-entry-links-to-id-p meeting-id)))
+      (should (equal journal-text (with-current-buffer source (buffer-string))))
+      (should (eq other (marker-buffer (org-id-find task-id 'marker))))
+      (should (eq source (marker-buffer (org-id-find meeting-id 'marker)))))))
+
+(ert-deftest nd/refile-reuses-backlink-and-preserves-other-references ()
+  (nd/test-with-meeting-refile
+      "* Friday\n** Meeting :meeting:\n:PROPERTIES:\n:ID: meeting-id\n:END:\n*** Actions\n- [[id:task-id][Original task label]]\n**** TODO Follow up\n:PROPERTIES:\n:ID: task-id\n:END:\nBacklink: [[id:meeting-id][Original meeting label]]\n"
+    (with-current-buffer source
+      (nd/test-heading "Follow up")
+      (nd/org-refile-with-meeting-links nil nil (nd/test-refile-location target "Tasks"))
+      (goto-char (point-min))
+      (should (= 2 (how-many (regexp-quote "[[id:task-id]") (point-min) (point-max))))
+      (should (string-match-p "Original task label" (buffer-string)))
+      (nd/test-refile-link-heading "task-id")
+      (should (= 4 (org-outline-level))))
+    (with-current-buffer target
+      (should (= 1 (how-many (regexp-quote "[[id:meeting-id]") (point-min) (point-max))))
+      (should (string-match-p "Original meeting label" (buffer-string))))))
+
+(ert-deftest nd/refile-multiple-actions-and-section ()
+  (dolist (selection '(forward-region backward-region section))
+    (nd/test-with-meeting-refile
+        "* Friday\n** Meeting :meeting:\n*** Actions\n**** TODO One\n***** TODO Child\n**** WAIT Two\n**** TODO Three\n"
+      (with-current-buffer source
+        (let ((transient-mark-mode t))
+          (if (eq selection 'section)
+              (nd/test-heading "Actions")
+            (let ((start (nd/test-heading "One"))
+                  (end (nd/test-heading "Three")))
+              (goto-char (if (eq selection 'forward-region) start end))
+              (set-mark (if (eq selection 'forward-region) end start))
+              (activate-mark)))
+          (nd/org-refile-with-meeting-links nil nil (nd/test-refile-location target "Tasks"))))
+      (dolist (title (if (eq selection 'section) '("One" "Two" "Three") '("One" "Two")))
+        (let ((id (with-current-buffer target
+                    (nd/test-heading title)
+                    (should (search-forward "Backlink:" (nd/org-next-heading) t))
+                    (org-id-get))))
+          (should id)
+          (unless (eq selection 'section)
+            (with-current-buffer source
+              (nd/test-refile-link-heading id)
+              (should (= 4 (org-outline-level)))
+              (should (org-up-heading-safe))
+              (should (equal "Actions" (org-get-heading t t t t)))))))
+      (with-current-buffer target
+        (nd/test-heading "Child")
+        (should-not (org-id-get)))
+      (if (eq selection 'section)
+          (let ((id (with-current-buffer target
+                      (nd/test-heading "Actions") (org-id-get))))
+            (should id)
+            (with-current-buffer source
+              (nd/test-refile-link-heading id)
+              (should (= 3 (org-outline-level)))
+              (should (= 1 (how-many (regexp-quote "[[id:") (point-min) (point-max))))))
+        (with-current-buffer source
+          (nd/test-heading "Actions")
+          (outline-next-heading)
+          (should (string-suffix-p "[One]]" (org-get-heading t t t t)))
+          (outline-next-heading)
+          (should (string-suffix-p "[Two]]" (org-get-heading t t t t)))
+          (outline-next-heading)
+          (should (equal "Three" (org-get-heading t t t t))))))))
+
+(ert-deftest nd/refile-cancel-and-failure-do-not-add-links-or-ids ()
+  (dolist (failure '(quit invalid-target))
+    (nd/test-with-meeting-refile
+        "* Friday\n** Meeting :meeting:\n*** TODO Action\n"
+      (with-current-buffer source
+        (nd/test-heading "Action")
+        (let ((before (buffer-string)))
+          (if (eq failure 'quit)
+              (cl-letf (((symbol-function 'org-refile-get-location)
+                         (lambda (&rest _) (signal 'quit nil))))
+                (should (eq 'cancelled
+                            (condition-case nil (nd/org-refile-with-meeting-links)
+                              (quit 'cancelled)))))
+            (should-error (nd/org-refile-with-meeting-links nil nil (nd/test-refile-location source "Action"))))
+          (should (equal before (buffer-string)))
+          (should-not (buffer-modified-p))))
+      (should (= 0 (hash-table-count org-id-locations)))
+      (with-current-buffer target (should-not (buffer-modified-p))))))
+
+(ert-deftest nd/refile-copy-navigation-and-whole-meeting-keep-native-behaviour ()
+  (dolist (operation '(copy keep navigate whole-meeting))
+    (nd/test-with-meeting-refile
+        "* Friday\n** Meeting :meeting:\n*** TODO Action\n"
+      (with-current-buffer source
+        (nd/test-heading (if (eq operation 'whole-meeting) "Meeting" "Action"))
+        (let ((org-refile-keep (eq operation 'keep)))
+          (nd/org-refile-with-meeting-links (pcase operation ('copy 3) ('navigate '(4)))
+                      nil (nd/test-refile-location target "Tasks"))))
+      (dolist (buffer (list source target))
+        (with-current-buffer buffer
+          (should-not (string-match-p "Backlink:\\|:ID:" (buffer-string))))))))
+
+(ert-deftest nd/refile-within-meeting-and-nonmeeting-tasks-do-not-add-links ()
+  (nd/test-with-meeting-refile
+      "* Friday\n** Meeting :meeting:\n*** Actions\n**** TODO Action\n*** Later\n** Work log\n*** TODO Other action\n"
+    (with-current-buffer source
+      (let ((location (nd/test-refile-location source "Later")))
+        (nd/test-heading "Action")
+        (nd/org-refile-with-meeting-links nil nil location))
+      (nd/test-heading "Other action")
+      (nd/org-refile-with-meeting-links nil nil (nd/test-refile-location target "Tasks")))
+    (dolist (buffer (list source target))
+      (with-current-buffer buffer
+        (should-not (string-match-p "Backlink:\\|:ID:" (buffer-string)))))))
+
+(ert-deftest nd/refile-meeting-action-from-agenda ()
+  (nd/test-with-meeting-refile
+      "* Friday\n** Meeting :meeting:\n*** TODO Agenda action\n"
+    (org-agenda nil "t")
+    (with-current-buffer org-agenda-buffer-name
+      (goto-char (point-min))
+      (search-forward "Agenda action")
+      (nd/org-agenda-refile-with-meeting-links nil (nd/test-refile-location target "Tasks") t))
+    (let ((id (with-current-buffer target
+                (nd/test-heading "Agenda action")
+                (should (search-forward "Backlink:" nil t))
+                (org-id-get))))
+      (should id)
+      (with-current-buffer source
+        (nd/test-refile-link-heading id)
+        (should (= 3 (org-outline-level)))))))
+
+(ert-deftest nd/refile-agenda-opt-in-restores-normal-refiling ()
+  (dolist (outcome '(success quit error))
+    (nd/test-with-meeting-refile
+        "* Friday\n** Meeting :meeting:\n*** TODO Linked action\n*** TODO Plain action\n"
+      (org-agenda nil "t")
+      (with-current-buffer org-agenda-buffer-name
+        (goto-char (point-min))
+        (search-forward "Linked action")
+        (let ((original (symbol-function 'org-refile)))
+          (if (eq outcome 'success)
+              (nd/org-agenda-refile-with-meeting-links
+               nil (nd/test-refile-location target "Tasks") t)
+            (cl-letf (((symbol-function 'org-refile-get-location)
+                       (lambda (&rest _) (signal outcome nil))))
+              (should (eq 'cancelled
+                          (condition-case nil
+                              (nd/org-agenda-refile-with-meeting-links)
+                            ((quit error) 'cancelled))))))
+          (should (eq original (symbol-function 'org-refile))))
+        (goto-char (point-min))
+        (search-forward "Plain action")
+        (org-agenda-refile nil (nd/test-refile-location other "Other project") t))
+      (with-current-buffer other
+        (nd/test-heading "Plain action")
+        (should-not (org-id-get))
+        (should-not (string-match-p "Backlink:" (buffer-string)))))))
+
+(ert-deftest nd/refile-links-stay-at-source-when-moving-within-journal-file ()
+  (dolist (layout '(before after adjacent))
+    (nd/test-with-meeting-refile
+        (concat (when (eq layout 'before) "* Destination\n")
+                "* Friday\n** Meeting :meeting:\n:PROPERTIES:\n:ID: meeting-id\n:END:\n*** TODO First\n:PROPERTIES:\n:ID: first-id\n:END:\n*** TODO Second\n:PROPERTIES:\n:ID: second-id\n:END:\n"
+                (when (eq layout 'after) "*** Context\nMeeting notes.\n* Destination\n"))
+      (with-current-buffer source
+        (let ((location (nd/test-refile-location source
+                                                (if (eq layout 'adjacent)
+                                                    "Friday" "Destination")))
+              (transient-mark-mode t))
+          (nd/test-heading "First")
+          (set-mark (point))
+          (nd/test-heading "Second")
+          (org-end-of-subtree t t)
+          (activate-mark)
+          (nd/org-refile-with-meeting-links nil nil location))
+        (nd/test-heading "Meeting")
+        (outline-next-heading)
+        (should (equal "[[id:first-id][First]]" (org-get-heading t t t t)))
+        (should (= 3 (org-outline-level)))
+        (outline-next-heading)
+        (should (equal "[[id:second-id][Second]]" (org-get-heading t t t t)))
+        (should (= 3 (org-outline-level)))
+        (dolist (title '("First" "Second"))
+          (nd/test-heading title)
+          (should (equal "TODO" (org-get-todo-state)))
+          (should (= 2 (org-outline-level)))
+          (should (nd/org-entry-links-to-id-p "meeting-id")))))))
 
 (ert-deftest nd/work-project-lookup-while-narrowed ()
   (nd/test-at "*** NEXT Available action"

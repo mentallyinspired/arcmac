@@ -1243,6 +1243,8 @@ unlike a directory a note can carry more than one.
   ;; emit file:/abs/path::*Heading, which any rename or retitle breaks.
   (org-id-link-to-org-use-id t)
   :config
+  ;; File links and ID backlinks follow in the current window.
+  (setf (alist-get 'file org-link-frame-setup) #'find-file)
   (add-to-list 'org-modules 'org-habit t))
 #+end_src
 
@@ -1476,7 +1478,7 @@ cursor is already on a heading) so the TODO retains its context."
   (interactive)
   (when (and (save-excursion (beginning-of-line) (org-at-heading-p))
              (org-get-todo-state))
-    (user-error "This is already a task; use SPC m r to refile the original"))
+    (user-error "This is already a task; refile with SPC m r, or SPC m R for meeting links"))
   (let* ((on-heading (save-excursion
                        (beginning-of-line)
                        (looking-at-p org-heading-regexp)))
@@ -1523,6 +1525,182 @@ cursor is already on a heading) so the TODO retains its context."
   (interactive)
   (call-interactively #'org-attach-url)
   (org-insert-last-stored-link 1))
+#+end_src
+
+** Meeting actions and refiling
+
+Refiling a task out of a journal meeting with =SPC m R=
+adds a =Backlink:= to the meeting and leaves a plain link to the live
+task as a heading at its original position and outline level.
+The same behaviour applies from the agenda and when moving several
+tasks together. Moving an Actions section leaves a linked Actions heading
+in its place. Moving a whole meeting keeps it intact.
+
+=SPC m r= and =C-c C-w= use ordinary Org refiling, without adding links.
+Existing links travel with the task whichever command you choose.
+
+Links use IDs, so subsequent refiles preserve the connection. Existing
+task backlinks are reused; other references in the meeting are preserved.
+The replacement heading has no TODO state or duplicate ID property;
+follow it to see the current task. Cancelling the destination prompt,
+copying, and using the refile command to navigate do not add links.
+
+#+name: org-meeting-refile
+#+begin_src emacs-lisp
+(require 'org-refile)
+(require 'org-id)
+(require 'cl-lib)
+
+;; Remove the earlier global override when reloading this block.
+(advice-remove 'org-refile #'nd/org-refile-with-meeting-links)
+
+(defun nd/org-refile-meeting-actions ()
+  "Describe meeting actions in the subtree or region about to be moved.
+Each record contains its heading index, meeting marker, and moved root's
+heading index, source marker and original level.  Read only: even missing
+IDs wait until a successful move."
+  (when-let* ((file (buffer-file-name (buffer-base-buffer)))
+              (_ (file-in-directory-p file
+                                     (expand-file-name "journal/" org-directory))))
+    (save-excursion
+      (let* ((region (org-region-active-p))
+             (start (if region
+                        (save-excursion
+                          (goto-char (region-beginning))
+                          (line-beginning-position))
+                      (org-back-to-heading t)
+                      (point)))
+             (end (if region (region-end) (org-end-of-subtree t t)))
+             (index 0)
+             (covered-until start)
+             positions
+             records)
+        (org-with-wide-buffer
+         (goto-char start)
+         (while (and (< (point) end) (org-at-heading-p))
+           (push (cons (point) index) positions)
+           (when (and (>= (point) covered-until)
+                      (member (org-get-todo-state)
+                              '("TODO" "NEXT" "WAIT" "DONE" "CANC"))
+                      (not (member "project" (org-get-tags nil t))))
+             (let ((meeting
+                    (save-excursion
+                      (catch 'meeting
+                        (while (org-up-heading-safe)
+                          (when (member "meeting" (org-get-tags nil t))
+                            (throw 'meeting (point))))))))
+               ;; A meeting travelling with its tasks needs no return links.
+               (when (and meeting (< meeting start))
+                 (let ((root (point)))
+                   ;; If a section is moved with its tasks, replace that
+                   ;; section with one link at its original outline level.
+                   (save-excursion
+                     (while (and (org-up-heading-safe) (>= (point) start))
+                       (setq root (point))))
+                   (push (list index (copy-marker meeting)
+                               (cdr (assq root positions))
+                               ;; Deletion collapses these markers; advance
+                               ;; them on insertion to retain selected order.
+                               (copy-marker root t)
+                               (save-excursion (goto-char root) (org-outline-level)))
+                         records))
+                 ;; A moved task's subtasks remain reachable through it.
+                 (setq covered-until (save-excursion (org-end-of-subtree t t))))))
+           (setq index (1+ index))
+           (outline-next-heading)))
+        (nreverse records)))))
+
+(defun nd/org-append-id-link (id title prefix)
+  "Append PREFIX and a link to ID in this entry's body unless already linked."
+  (unless (nd/org-entry-links-to-id-p id)
+    (goto-char (nd/org-next-heading))
+    (skip-chars-backward " \t\n\r")
+    (end-of-line)
+    (insert "\n" prefix (org-link-make-string (concat "id:" id) title) "\n")))
+
+(defun nd/org-link-refiled-meeting-action (meeting)
+  "Link the moved task at point to MEETING and return its ID.
+Return nil when rearranging a task within the same meeting."
+  (let ((task (point-marker)))
+    (unwind-protect
+        ;; Rearranging tasks inside the same meeting needs no extra links.
+        (unless (org-with-point-at meeting
+                  (and (eq (or (buffer-base-buffer (marker-buffer task))
+                               (marker-buffer task))
+                           (or (buffer-base-buffer) (current-buffer)))
+                       (<= (point) task)
+                       (< task (save-excursion (org-end-of-subtree t t)))))
+          (let* ((id (org-id-get-create))
+                 (source (org-with-point-at meeting
+                           (list (org-id-get-create) (org-get-heading t t t t)))))
+            (org-with-point-at task
+              (nd/org-append-id-link (car source) (cadr source) "Backlink: "))
+            id))
+      (set-marker task nil))))
+
+(defun nd/org-leave-refiled-heading-link (origin level)
+  "Leave a link to the moved heading at ORIGIN, using its original LEVEL."
+  (let ((id (org-id-get-create))
+        (title (org-get-heading t t t t)))
+    (org-with-point-at origin
+      (unless (bolp) (insert "\n"))
+      (insert (make-string level ?*) " "
+              (org-link-make-string (concat "id:" id) title))
+      ;; A narrowed refile can leave the original terminating newline.
+      (unless (eq (char-after) ?\n) (insert "\n")))))
+
+(defun nd/org--refile-with-meeting-links (refile &rest args)
+  "Call REFILE with ARGS, connecting meeting actions after a successful move.
+Observe the insertion hook without editing either buffer until Org has
+also removed the source.  This preserves region lengths and cancellation."
+  (let* ((arg (car args))
+         (records (when (and (derived-mode-p 'org-mode)
+                             (not (org-before-first-heading-p))
+                             (not org-refile-keep)
+                             (memq arg '(nil 2)))
+                    (nd/org-refile-meeting-actions)))
+         destination)
+    (unwind-protect
+        (if (null records)
+            (apply refile args)
+          (let ((org-after-refile-insert-hook
+                 (cons (lambda () (setq destination (copy-marker (point) t)))
+                       org-after-refile-insert-hook)))
+            (prog1 (apply refile args)
+              (when destination
+                (org-with-point-at destination
+                  (let (roots)
+                    (dolist (record records)
+                      (goto-char destination)
+                      (dotimes (_ (car record)) (outline-next-heading))
+                      (when (nd/org-link-refiled-meeting-action (nth 1 record))
+                        (unless (assq (nth 2 record) roots)
+                          (push (nthcdr 2 record) roots))))
+                    (dolist (root (nreverse roots))
+                      (goto-char destination)
+                      (dotimes (_ (car root)) (outline-next-heading))
+                      (nd/org-leave-refiled-heading-link
+                       (nth 1 root) (nth 2 root)))))))))
+      (when destination (set-marker destination nil))
+      (dolist (record records)
+        (set-marker (nth 1 record) nil)
+        (set-marker (nth 3 record) nil)))))
+
+(defun nd/org-refile-with-meeting-links (&optional arg default-buffer rfloc msg)
+  "Refile with links between journal meeting actions and their source.
+Accept the same arguments and prefix commands as `org-refile'."
+  (interactive "P")
+  (nd/org--refile-with-meeting-links #'org-refile arg default-buffer rfloc msg))
+
+(defun nd/org-agenda-refile-with-meeting-links (&optional goto rfloc no-update)
+  "Refile the agenda entry with meeting links, preserving agenda updates."
+  (interactive "P")
+  (require 'org-agenda)
+  ;; Scope the extra behaviour to this command, including errors and quits.
+  (cl-letf (((symbol-function 'org-refile)
+             (apply-partially #'nd/org--refile-with-meeting-links
+                              (symbol-function 'org-refile))))
+    (org-agenda-refile goto rfloc no-update)))
 #+end_src
 
 ** Contacts
@@ -2579,6 +2757,9 @@ refiles. Two places deviate, both because this config got there first —
 =SPC m a= is =nd/action-to-inbox= (Doom's org-attach) and =SPC m B= is
 =org-babel-tangle=.
 
+=SPC m R= refiles with meeting backlinks and a linked heading left at the
+source. =SPC m r= keeps ordinary refiling. Both work in Org and the agenda.
+
 =SPC m b= opens/reuses the containing project's indirect buffer, and
 =SPC m M= shows its journal meetings. Both work from Org and the agenda.
 
@@ -2613,6 +2794,7 @@ with the other =g= movement keys evil-collection puts there. Plain
     (kbd "<leader>mp") #'org-priority
     (kbd "<leader>mq") #'org-set-tags-command
     (kbd "<leader>mr") #'org-refile
+    (kbd "<leader>mR") #'nd/org-refile-with-meeting-links
     (kbd "<leader>ms") #'org-sort
     (kbd "<leader>mo") #'org-set-property
     ;; org-archive-location sends these to ~/org/archive/, see Settings
@@ -2650,6 +2832,7 @@ with the other =g= movement keys evil-collection puts there. Plain
     (kbd "<leader>mp") #'org-agenda-priority
     (kbd "<leader>mq") #'org-agenda-set-tags
     (kbd "<leader>mr") #'org-agenda-refile
+    (kbd "<leader>mR") #'nd/org-agenda-refile-with-meeting-links
     (kbd "<leader>mo") #'org-agenda-set-property
     (kbd "<leader>mA") #'org-agenda-archive
     (kbd "<leader>mb") #'nd/org-open-project
