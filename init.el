@@ -1409,15 +1409,54 @@ Unknown names return nil; ambiguous names require an explicit selection."
   (when (and link (string-match "\\[\\[id:\\([^]]+\\)\\]" link))
     (match-string 1 link)))
 
-(defun nd/read-organizational-unit ()
-  "Select a registered unit and return a canonical ID link; blank means none."
-  (let* ((candidates (nd/contact-candidates (nd/contact-records t) t))
-         (choice (completing-read "Organizational unit (optional): " candidates nil t))
-         (entry (cdr (assoc choice candidates))))
-    (if entry
-        (org-link-make-string (concat "id:" (plist-get entry :id))
-                              (plist-get entry :name))
-      "")))
+(defun nd/org-linked-values (text)
+  "Split comma-separated TEXT without splitting inside Org links."
+  (let ((start 0) values)
+    (while (string-match org-link-bracket-re (or text "") start)
+      (let ((before (substring text start (match-beginning 0)))
+            (link (match-string 0 text))
+            (end (match-end 0)))
+        (setq values (append values (split-string before "," t "[ \t\n]+") (list link))
+              start end)))
+    (append values (split-string (substring (or text "") start) "," t "[ \t\n]+"))))
+
+(defun nd/org-completion-with-current (current candidates)
+  "Return (CANDIDATES . INITIAL-INPUT), retaining selections in CURRENT.
+CANDIDATES maps labels to stored values.  Match links by ID, and keep
+missing records as choices so editing another selection cannot drop them."
+  (setq candidates (mapcar (lambda (pair) (cons (string-trim (car pair)) (cdr pair)))
+                          candidates))
+  (let (initial)
+    (dolist (value (nd/org-linked-values current))
+      (let* ((id (nd/org-id-from-link value))
+             (existing (seq-find
+                        (lambda (pair)
+                          (if id (equal id (nd/org-id-from-link (cdr pair)))
+                            (equal value (cdr pair)))) candidates))
+             (label (or (car existing)
+                        (replace-regexp-in-string "," ";" (org-link-display-format value)))))
+        (unless existing
+          (let ((base label) (suffix 1))
+            (while (assoc label candidates)
+              (setq label (format "%s <%d>" base suffix)
+                    suffix (1+ suffix))))
+          (push (cons label value) candidates))
+        (push label initial)))
+    (cons candidates (string-join (nreverse initial) ", "))))
+
+(defun nd/read-organizational-unit (&optional current)
+  "Select a unit ID link, initially CURRENT; empty input clears it."
+  (let* ((choices (nd/org-completion-with-current
+                   current
+                   (mapcar (lambda (pair)
+                             (cons (car pair)
+                                   (org-link-make-string
+                                    (concat "id:" (plist-get (cdr pair) :id))
+                                    (plist-get (cdr pair) :name))))
+                           (nd/contact-candidates (nd/contact-records t) t))))
+         (choice (completing-read "Organisational unit (empty for none): "
+                                  (car choices) nil t (cdr choices))))
+    (or (cdr (assoc choice (car choices))) "")))
 
 (defun nd/read-contact-context ()
   "Read a lowercase context, suggesting both existing and usual values."
@@ -1430,21 +1469,33 @@ Unknown names return nil; ambiguous names require an explicit selection."
                                       (nd/contact-records)))))
     "[: \t]+" "[: \t]+")))
 
-(defun nd/read-attendees ()
-  "Select attendees by name/alias, deduplicating IDs and keeping unknown names."
+(defun nd/read-attendees (&optional current)
+  "Edit CURRENT attendees by name/alias, retaining guests and deduplicating IDs."
   (let* ((candidates (nd/contact-candidates (nd/contact-records)))
-         (picked (completing-read-multiple "Attendees (comma-separated): " candidates))
+         (choices (nd/org-completion-with-current
+                   current
+                   (mapcar (lambda (pair)
+                             (cons (car pair)
+                                   (org-link-make-string
+                                    (concat "id:" (plist-get (cdr pair) :id))
+                                    (plist-get (cdr pair) :name)))) candidates)))
+         (picked (completing-read-multiple "Attendees (comma-separated): "
+                                           (car choices) nil nil (cdr choices)))
          seen links)
     (dolist (raw picked)
       (let* ((name (string-trim raw))
-             (entry (nd/contact-resolve name candidates))
-             (id (plist-get entry :id))
-             (key (if id (concat "id:" id) (concat "name:" (downcase name)))))
+             (stored (cdr (assoc name (car choices))))
+             (entry (unless stored (nd/contact-resolve name candidates)))
+             (value (or stored
+                        (when entry
+                          (org-link-make-string (concat "id:" (plist-get entry :id))
+                                                (plist-get entry :name)))
+                        name))
+             (id (nd/org-id-from-link value))
+             (key (if id (concat "id:" id) (concat "name:" (downcase value)))))
         (unless (or (string-empty-p name) (member key seen))
           (push key seen)
-          (push (if id (org-link-make-string (concat "id:" id) (plist-get entry :name))
-                  name)
-                links))))
+          (push value links))))
     (string-join (nreverse links) ", ")))
 
 (defun nd/organization-subtree-ids (id)
@@ -1695,7 +1746,7 @@ be filtered to."
            :empty-lines 1)
 
           ("jm" "Meeting" plain (function nd/org-journal-find-location)
-           "** %(format-time-string org-journal-time-format)%^{Title} %(nd/read-tags \"meeting\" \"unprocessed\")\n:PROPERTIES:\n:ID: %(org-id-new)\n:ATTENDEES: %(nd/read-attendees)\n:ORG_UNIT:  %(nd/read-organizational-unit)\n:END:\n%U\nProject: %(nd/org-read-project-links)\n- Agenda :: %?\n- Notes ::\n- Decisions ::\n*** Actions\n")
+           "** %(format-time-string org-journal-time-format)%^{Title} :meeting:unprocessed:\n:PROPERTIES:\n:ID: %(org-id-new)\n:ATTENDEES:\n:ORG_UNIT:\n:END:\n%U\nProject: \n\n*** Agenda\n\n*** Notes\n%?\n\n*** Decisions\n\n*** Actions\n")
           ("jw" "Work log" plain (function nd/org-journal-find-location)
            "** %(format-time-string org-journal-time-format)%^{Title} %(nd/read-tags)\n- Done :: %?\n- Blockers ::\n")
           ("ji" "Idea" plain (function nd/org-journal-find-location)
@@ -1972,8 +2023,8 @@ is keyed by project ID and base buffer, not by the project title."
       :narrow nil :super-groups nil :sort nil
       :title (concat "Meetings — " (cadr project)))))
 
-(defun nd/org-read-project-links ()
-  "Select zero or more existing projects for a meeting capture."
+(defun nd/org-read-project-links (&optional current)
+  "Edit CURRENT project links, keeping existing closed or missing projects."
   (let (roster)
     (dolist (file (nd/org-domain-files))
       (with-current-buffer (find-file-noselect file)
@@ -1984,11 +2035,84 @@ is keyed by project ID and base buffer, not by the project title."
               (when-let* ((id (org-entry-get nil "ID")))
                 (push (cons (format "%s / %s" (file-name-base file)
                                     (org-get-heading t t t t)) id) roster)))) nil nil))))
-    (mapconcat
-     (lambda (name) (org-link-make-string
-                    (concat "id:" (cdr (assoc name roster))) name))
-     (completing-read-multiple "Projects (blank for none): " (nreverse roster) nil t)
-     ", ")))
+    (setq roster (nreverse roster))
+    (let* ((candidates
+            (mapcar
+             (lambda (pair)
+               (let ((label (replace-regexp-in-string "," ";" (car pair))))
+                 (cons (if (> (cl-count label roster
+                                       :key (lambda (item)
+                                              (replace-regexp-in-string "," ";" (car item)))
+                                       :test #'equal) 1)
+                           (format "%s <%s>" label (cdr pair))
+                         label)
+                       (org-link-make-string (concat "id:" (cdr pair)) (car pair)))))
+             roster))
+           (choices (nd/org-completion-with-current current candidates)))
+      (mapconcat
+       (lambda (name) (cdr (assoc name (car choices))))
+       (delete-dups
+        (completing-read-multiple "Projects (comma-separated): "
+                                  (car choices) nil t (cdr choices)))
+       ", "))))
+
+(defun nd/org-meeting-details (&optional field)
+  "Edit one FIELD of the containing meeting, also from the agenda.
+Existing selections are editable input; delete them to clear a field.
+Meeting and review tags are preserved.  Use `org-set-tags-command' to
+remove unprocessed after reviewing decisions and filing actions."
+  (interactive)
+  (let* ((agenda (derived-mode-p 'org-agenda-mode))
+         (marker (if agenda
+                     (or (org-get-at-bol 'org-hd-marker) (org-get-at-bol 'org-marker))
+                   (and (derived-mode-p 'org-mode) (point-marker)))))
+    (unless (and (markerp marker) (marker-buffer marker))
+      (user-error "Select a meeting or an entry inside it"))
+    (org-with-point-at marker
+      (org-with-wide-buffer
+       (org-back-to-heading t)
+       (while (and (not (member "meeting" (org-get-tags nil t)))
+                   (org-up-heading-safe)))
+       (unless (member "meeting" (org-get-tags nil t))
+         (user-error "No containing heading tagged :meeting:"))
+       (let ((field (or field (completing-read "Meeting detail: "
+                                             '("Attendees" "Organisation" "Projects" "Tags")
+                                             nil t))))
+         (atomic-change-group
+           (pcase field
+             ("Attendees"
+              (org-entry-put nil "ATTENDEES" (nd/read-attendees (org-entry-get nil "ATTENDEES"))))
+             ("Organisation"
+              (org-entry-put nil "ORG_UNIT" (nd/read-organizational-unit (org-entry-get nil "ORG_UNIT"))))
+             ("Projects"
+              (let* ((end (nd/org-next-heading))
+                     (line (save-excursion
+                             (forward-line 1)
+                             (catch 'line
+                               (while (re-search-forward "^Project:[ \t]*\\(.*\\)$" end t)
+                                 (let ((found (cons (line-beginning-position)
+                                                    (match-string-no-properties 1))))
+                                   (when (eq (org-element-type (org-element-at-point)) 'paragraph)
+                                     (throw 'line found)))))))
+                     (value (nd/org-read-project-links (cdr line))))
+                (if line
+                    (progn (goto-char (car line))
+                           (delete-region (point) (line-end-position)))
+                  (org-end-of-meta-data t)
+                  (unless (bolp) (insert "\n")))
+                (insert "Project: " value)
+                (unless line (insert "\n"))))
+             ("Tags"
+              (let* ((current (org-get-tags nil t))
+                     (reserved '("meeting" "unprocessed"))
+                     (picked (completing-read-multiple
+                              "Tags (comma-separated): "
+                              (seq-remove (lambda (tag) (member tag reserved))
+                                          (mapcar #'car org-tag-persistent-alist))
+                              nil nil (string-join (seq-difference current reserved) ", "))))
+                (org-set-tags (delete-dups (append (seq-intersection current reserved) picked)))))
+             (_ (user-error "Unknown meeting detail: %s" field)))))))
+    (when agenda (org-agenda-redo))))
 
 (defun nd/org-refresh-id-index ()
   "Index notes, domain files, journals and archives without changing agenda scope."
@@ -2292,6 +2416,7 @@ is keyed by project ID and base buffer, not by the project title."
     ;; point at — this is how an entry gets one before it is linked to
     (kbd "<leader>mI") #'org-id-get-create
     (kbd "<leader>mM") #'nd/org-project-meetings
+    (kbd "<leader>mE") #'nd/org-meeting-details
     ;; clock
     (kbd "<leader>mci") #'org-clock-in
     (kbd "<leader>mco") #'org-clock-out
@@ -2326,6 +2451,7 @@ is keyed by project ID and base buffer, not by the project title."
     (kbd "<leader>mA") #'org-agenda-archive
     (kbd "<leader>mb") #'nd/org-open-project
     (kbd "<leader>mM") #'nd/org-project-meetings
+    (kbd "<leader>mE") #'nd/org-meeting-details
     (kbd "<leader>mci") #'org-agenda-clock-in
     (kbd "<leader>mco") #'org-agenda-clock-out
     (kbd "<leader>mcc") #'org-agenda-clock-cancel

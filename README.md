@@ -117,8 +117,19 @@ code/config and utilities. Agenda views use the current window, and `q`
 restores the previous window layout. Saving behaviour is unchanged.
 
 Domain tags inherit from `gtd/*.org`; `project`, `focus`, `meeting` and
-`unprocessed` are local entry tags. Meeting capture retains `org-journal`
-and the contact/unit selectors and adds project ID links.
+`unprocessed` are local entry tags. Meeting capture (`SPC n j m`) asks
+only for a title and starts under Notes, with separate Agenda, Notes,
+Decisions and Actions headings. It adds the ID, timestamp and
+`meeting:unprocessed` tags automatically.
+
+Use `SPC m E` (`nd/org-meeting-details`) anywhere inside a meeting or
+on its agenda entry to edit Attendees, Organisation, Projects or Tags.
+The selectors start with the current choices: press Enter to keep them,
+add comma-separated choices, or delete the input to clear the field.
+Attendees accept directory names/aliases and unregistered guests;
+organisation and project choices retain ID links. Editing details keeps
+the meeting's review status. Remove `unprocessed` with `SPC m q` after
+clarifying decisions and assigning or filing actions.
 
 Use `SPC m r` (or `C-c C-w`) for ordinary refiling without adding links.
 Use `SPC m R` to refile with meeting links, in Org or the agenda. The
