@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 emacs --batch --quick --eval "(require 'ob-tangle)" \
   --eval '(org-babel-tangle-file "config.org")'
 
-nix flake check   # tangle-drift check + nixfmt formatting check
+nix flake check   # tangle, formatting, Org workflow, startup and mail sync checks
 nix fmt           # apply canonical formatting to the .nix files
 ```
 
@@ -34,7 +34,7 @@ that.
 `tangle` flake check fails if the committed `.el` files drift.
 
 **Philosophy (owner's explicit rule):** built-in first, extend deliberately.
-Every external package in `module.nix` carries a one-line justification — if a
+Every external package in `emacs-package.nix` carries a one-line justification — if a
 line can't justify itself, it doesn't get added. Don't add packages, an
 `extraConfig` escape hatch, or completion frameworks (vertico/corfu were
 deliberately rejected in favor of the stock *Completions* buffer).

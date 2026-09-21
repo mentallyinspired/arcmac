@@ -4,6 +4,8 @@ Built-ins-first vanilla Emacs 31, packaged as a Nix flake.
 
 - `config.org` — literate config, tangled to `init.el` + `early-init.el`
   (both committed; the `tangle` flake check enforces they stay in sync).
+- `emacs-package.nix` — Emacs build and package set shared by the module
+  and the startup check.
 - `module.nix` — Home Manager module: Emacs 31 pretest (pgtk, prebuilt via
   emacs-overlay) with the few external packages nix provides, `emacs` /
   `emacsclient` wrappers pinned to this config via `--init-directory`, the
@@ -11,7 +13,7 @@ Built-ins-first vanilla Emacs 31, packaged as a Nix flake.
   and `EDITOR=emacsclient -t`.
 
 Philosophy: built-in first, extend deliberately. Every external package is
-listed with a one-line justification in `module.nix` — if a line can't
+listed with a one-line justification in `emacs-package.nix` — if a line can't
 justify itself, it doesn't get added.
 
 ## Usage
@@ -92,9 +94,19 @@ the manual clone command and carries on).
 
 Edit `config.org`, tangle (`C-c C-v t` inside Emacs, or the command in the
 file header), commit `config.org` together with both `.el` files.
-`nix flake check` runs the tangle check and `nixfmt` formatting check.
+`nix flake check` runs the tangle check, `nixfmt` formatting check, Org
+workflow tests, and a full startup check using the module's Emacs package.
+Mail sync checks use fake mail commands to test ordering, failures and
+concurrent calls without contacting a server.
+The startup check launches a separate daemon with temporary config, state
+and notes, exercises Org and code hooks, and exits. It does not restart
+your running Emacs. To run it with the installed Emacs and dependencies:
 
-It also runs the built-in Org workflow regression tests. To include the
+```sh
+bash tests/startup-check.sh
+```
+
+To run the Org workflow regression tests locally, including the
 project-meeting query test using the installed `org-ql`, run:
 
 ```sh
@@ -112,9 +124,25 @@ and `W` (waiting); existing domain overview keys are retained.
 `SPC m b` opens a reusable, project-only buffer from Org or an agenda
 entry. It shares edits with the original file but keeps its own folding
 and cursor position. `SPC b d` closes the view; the source file stays open.
+`SPC m U` updates the containing project's `Nuläge` and `Återuppta`, with
+the current text prefilled. It refreshes `Uppdaterad` when the summary
+changes and adds missing fields to older projects.
 `SPC b i` groups buffers into tasks/projects, journals, notes, reference,
 code/config and utilities. Agenda views use the current window, and `q`
-restores the previous window layout. Saving behaviour is unchanged.
+restores the previous window layout. Automatic saving applies only to
+local Org files inside `org-directory`, including edits through person
+and project views. Code and Org files elsewhere need explicit saving.
+
+Inbox capture opens directly for writing; add tags during review.
+New note captures require a title and choose a free filename (`name.org`,
+`name-2.org`, etc.), preserving existing notes and unsaved file buffers.
+
+`SPC m w` sets a task to `WAIT`, asking for a contact (or an unregistered
+name) and a follow-up date. The `WAITING_FOR` property stores the person;
+`SCHEDULED` stores the follow-up. Existing choices are prefilled, and
+cancelling leaves the task unchanged. Waiting and weekly review views
+show the owner and date, or indicate missing information. Both this and
+project-summary updates work from Org, focused views and agenda entries.
 
 Domain tags inherit from `gtd/*.org`; `project`, `focus`, `meeting` and
 `unprocessed` are local entry tags. Meeting capture (`SPC n j m`) asks
@@ -156,7 +184,12 @@ view, `SPC n c o` contacts in an organisation and its child units,
 `SPC n c h` the person's references in saved notes and archives, and
 `SPC n c r` contact details needing review.
 
-In the directory, `RET` opens a person, `h` opens history, `/` filters
+Contact capture asks only for a name (with confirmation for duplicate
+names). Use `SPC n c e` from a person view or contact link to edit one
+field: Context, Organisation, Position, Email, Mobile or Aliases. Existing
+values are prefilled; clear the input to remove a value.
+
+In the directory, `RET` opens a person, `e` edits details, `h` opens history, `/` filters
 context, `o` selects a unit, `a` clears filters and `g` refreshes.
 Use `C-s` to search names, aliases or organisation names. Person views
 share edits with `ref/people.org`. History matches exact ID links;
@@ -167,6 +200,32 @@ selection, and `ORG_UNIT` links to `ref/organizations.org`. Meeting capture
 removes duplicate selections of the same person and keeps unknown guests
 as text. Conflicting names or employers remain in `CONTACT_REVIEW` until
 confirmed. Refresh dashboard tables with `C-u C-c C-x C-u`.
+
+## Search
+
+`SPC n /` searches `org-directory` with ripgrep, which the module installs.
+`SPC n R` searches a Recoll document index if configured. For Recoll, add
+`pkgs.recoll` to `home.packages`, choose indexed folders in `recoll.conf`
+and run `recollindex`. The command checks the executable and index before
+opening search and offers setup guidance if either is unavailable.
+Custom `RECOLL_CONFDIR` settings are respected.
+
+## Mail sync
+
+With `mail.enable = true`, the module installs `mail-sync`. The shell,
+Emacs `gR` and the five-minute `mbsync.timer` share its fetch/index/push
+pipeline and lock. A concurrent manual request reports “already running”;
+after sending, Emacs queues a sync to include the new Sent copy. Errors
+remain visible in `*notmuch-sync*` or `journalctl --user -u mbsync`.
+Sent-folder matching treats account addresses literally, including `+`.
+
+Without Nix, install the executable `scripts/mail-sync.sh` as `mail-sync`
+on PATH alongside mbsync, notmuch and flock.
+
+After pulling module changes, update the `arcmac` input and rebuild the
+consuming Home Manager/NixOS configuration to install the command and
+dependencies. Restart Emacs to load the updated Lisp; open a new shell
+to drop the previous `mail-sync` alias.
 
 ## License
 

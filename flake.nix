@@ -30,6 +30,7 @@
     let
       system = "x86_64-linux";
       pkgs = nixpkgs.legacyPackages.${system};
+      arcmacEmacs = import ./emacs-package.nix { inherit pkgs emacs-overlay; };
     in
     {
       homeManagerModules = rec {
@@ -38,6 +39,44 @@
       };
 
       checks.${system} = {
+        mail-sync =
+          pkgs.runCommand "mail-sync-check"
+            {
+              nativeBuildInputs = [
+                (import ./mail-sync.nix { inherit pkgs; })
+                pkgs.python3
+                pkgs.util-linux
+              ];
+              src = self;
+            }
+            ''
+              # Build/shellcheck the installed entry point, then exercise
+              # its script with fake tools: no account or network access.
+              status=0
+              mail-sync --invalid || status=$?
+              test "$status" -eq 64
+              python "$src/tests/mail-sync-test.py"
+              touch "$out"
+            '';
+
+        # Exercise actual early-init/init and startup hooks in a separate
+        # foreground daemon, with the same Emacs/packages as the module.
+        startup =
+          pkgs.runCommand "startup-check"
+            {
+              nativeBuildInputs = [
+                (pkgs.hunspell.withDicts (dicts: [
+                  dicts.sv_SE
+                  dicts.en_US-large
+                ]))
+              ];
+              src = self;
+            }
+            ''
+              bash "$src/tests/startup-check.sh" ${arcmacEmacs}/bin/emacs "$src"
+              touch "$out"
+            '';
+
         # config.org tangles to TWO files via per-block :tangle headers, so
         # tangle next to a copy and diff both against the committed output.
         tangle =

@@ -11,6 +11,7 @@
 let
   cfg = config.programs.arcmac;
   mailcfg = cfg.mail;
+  mailSync = import ./mail-sync.nix { inherit pkgs; };
 
   # All accounts live on the same server; only address and secret differ.
   mkAccount = name: acct: {
@@ -107,6 +108,8 @@ in
   };
 
   config = lib.mkIf mailcfg.enable {
+    home.packages = [ mailSync ];
+
     accounts.email = {
       maildirBasePath = "Maildir";
       accounts = lib.mapAttrs mkAccount mailcfg.accounts;
@@ -188,29 +191,29 @@ in
       '';
     };
 
-    # Poll the server every 5 minutes (systemd user timer mbsync.timer). The
-    # postExec `notmuch new` runs the full tagging pipeline (hooks above:
-    # trash sweep, 30-day purge, sent/trash normalization, afew triage).
-    # Local changes made between runs — read flags, trash moves, purges —
-    # reach the server on the following cycle, i.e. within 5 minutes.
-    # Overlap with a manual mail-sync is harmless: mbsync locks per-channel
-    # and the loser skips.
-    services.mbsync = {
-      enable = true;
-      frequency = "*:0/5";
-      postExec = "${pkgs.writeShellScript "mbsync-post" ''
-        ${pkgs.notmuch}/bin/notmuch new
-      ''}";
+    # Keep the existing unit names, sharing exactly the same pull/index/push
+    # command and lock with Emacs and the shell. Exit 75 means a manual sync
+    # already holds the lock; the next timer tick will try again.
+    systemd.user.services.mbsync = {
+      Unit.Description = "Mail synchronization and indexing";
+      Service = {
+        Type = "oneshot";
+        ExecStart = "${mailSync}/bin/mail-sync";
+        SuccessExitStatus = [ 75 ];
+      };
     };
-
-    # Full pull-tag chain. The trailing mbsync pushes what the notmuch hooks
-    # just did locally (moves into Trash, 30-day purges) up to the server in
-    # the same run instead of waiting for the next sync.
-    programs.zsh.shellAliases.mail-sync = "mbsync -a && notmuch new && mbsync -a";
+    systemd.user.timers.mbsync = {
+      Unit.Description = "Sync mail every five minutes";
+      Timer = {
+        OnCalendar = "*:0/5";
+        Unit = "mbsync.service";
+      };
+      Install.WantedBy = [ "timers.target" ];
+    };
 
     # Escape hatch: empty the Trash now instead of waiting out the 30 days.
     # Destructive and unprompted — trashed mail is gone for good after this.
-    programs.zsh.shellAliases.mail-empty-trash = "notmuch search --output=files --format=text0 -- \"folder:/Trash/ or tag:trash or tag:deleted\" | xargs -0 -r rm -f && notmuch new && mbsync -a";
+    programs.zsh.shellAliases.mail-empty-trash = "notmuch search --output=files --format=text0 -- \"folder:/Trash/ or tag:trash or tag:deleted\" | xargs -0 -r rm -f && mail-sync --wait";
 
     assertions = [
       {

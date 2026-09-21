@@ -771,21 +771,38 @@ not deleted here and get cleaned up when /tmp is wiped at reboot."
   (defun nd/notmuch-refresh-after-quit (&rest _)
     (when (derived-mode-p 'notmuch-search-mode 'notmuch-hello-mode)
       (notmuch-refresh-this-buffer)))
-  (advice-add 'notmuch-bury-or-kill-this-buffer :after #'nd/notmuch-refresh-after-quit)
+  (advice-add 'notmuch-bury-or-kill-this-buffer :after #'nd/notmuch-refresh-after-quit))
 
-  (defun nd/notmuch-sync ()
-    "Full mail sync: fetch, index, push tag changes (mbsync → notmuch → mbsync)."
-    (interactive)
-    (message "Syncing mail…")
-    (set-process-sentinel
-     (start-process-shell-command
-      "notmuch-sync" "*notmuch-sync*"
-      "mbsync -a && notmuch new && mbsync -a")
+(defun nd/notmuch-sync (&optional wait)
+  "Run the shared mail-sync command asynchronously.
+With WAIT, queue behind any current sync, for mail just sent."
+  (interactive)
+  (let ((program (executable-find "mail-sync")))
+    (unless program
+      (user-error "Install the arcmac mail module (or scripts/mail-sync.sh as mail-sync)"))
+    (message (if wait "Mail sync queued…" "Syncing mail…"))
+    (make-process
+     :name "notmuch-sync" :buffer (get-buffer-create "*notmuch-sync*")
+     :command (append (list program) (when wait '("--wait")))
+     :connection-type 'pipe :noquery t
+     :sentinel
      (lambda (proc _event)
-       (if (zerop (process-exit-status proc))
-           (progn (notmuch-refresh-all-buffers)
-                  (message "Mail sync done"))
-         (message "Mail sync failed — see *notmuch-sync*"))))))
+       (when (memq (process-status proc) '(exit signal))
+         (cond
+          ((and (eq (process-status proc) 'exit) (zerop (process-exit-status proc)))
+           (when (fboundp 'notmuch-refresh-all-buffers) (notmuch-refresh-all-buffers))
+           (message "Mail sync done"))
+          ((and (eq (process-status proc) 'exit) (= (process-exit-status proc) 75))
+           (message "Mail sync already running"))
+          (t (message "Mail sync failed — see *notmuch-sync*"))))))))
+
+(defun nd/mail-push-sent ()
+  "Queue a full sync after sending, including when another sync is running."
+  ;; A sync problem must not make an already sent message look unsent.
+  (condition-case err
+      (nd/notmuch-sync t)
+    (error (message "Mail sent; sync unavailable: %s" (error-message-string err)))))
+(add-hook 'message-sent-hook #'nd/mail-push-sent)
 
 (setq sendmail-program (executable-find "msmtp")
       message-send-mail-function #'message-send-mail-with-sendmail
@@ -798,19 +815,12 @@ not deleted here and get cleaned up when /tmp is wiped at reboot."
 (with-eval-after-load 'notmuch
   (setq notmuch-fcc-dirs
         (append (mapcar (lambda (acct)
-                          (cons (cadr acct)
+                          (cons (regexp-quote (cadr acct))
                                 (format "%s/Sent +sent -inbox -unread" (car acct))))
                         nd/mail-accounts)
                 (when nd/mail-accounts
                   (list (cons ".*" (format "%s/Sent +sent -inbox -unread"
                                            (caar nd/mail-accounts))))))))
-
-(defun nd/mail-push-sent ()
-  (when-let* ((mbsync (executable-find "mbsync")))
-    (apply #'start-process "mbsync-sent" nil mbsync
-           (mapcar (lambda (acct) (format "%s:Sent" (car acct)))
-                   nd/mail-accounts))))
-(add-hook 'message-sent-hook #'nd/mail-push-sent)
 
 (with-eval-after-load 'evil
   (evil-define-key '(normal visual) 'global
@@ -1092,6 +1102,43 @@ the Swedish letters."
          (s (replace-regexp-in-string "[^a-z0-9]+" "-" s)))
     (string-trim s "-+" "-+")))
 
+(defun nd/read-note-title ()
+  "Read a nonempty note title."
+  (let ((title (string-trim (read-string "Title: "))))
+    (when (string-empty-p title) (user-error "A title is required"))
+    title))
+
+(defun nd/unique-note-file (path)
+  "Return PATH or a numbered alternative, preserving existing notes.
+File-visiting buffers reserve their names even before the first save."
+  (let* ((path (expand-file-name path))
+         (stem (file-name-sans-extension path))
+         (extension (or (file-name-extension path t) ""))
+         (candidate path)
+         (number 2))
+    (while (or (file-exists-p candidate) (get-file-buffer candidate))
+      (setq candidate (format "%s-%d%s" stem number extension)
+            number (1+ number)))
+    candidate))
+
+(defun nd/note-capture-file ()
+  "Read a title and choose a new file for note capture."
+  (setq nd/capture-default-title (nd/read-note-title))
+  (let ((slug (nd/note-slug nd/capture-default-title)))
+    (nd/unique-note-file
+     (expand-file-name (concat (if (string-empty-p slug) "note" slug) ".org")
+                       (nd/notes-directory)))))
+
+(defun nd/org-meeting-heading ()
+  "Return the nearest heading locally tagged meeting, including outside narrowing."
+  (org-with-wide-buffer
+   (unless (org-before-first-heading-p)
+     (org-back-to-heading t)
+     (catch 'meeting
+       (while t
+         (when (member "meeting" (org-get-tags nil t)) (throw 'meeting (point)))
+         (unless (org-up-heading-safe) (throw 'meeting nil)))))))
+
 (defvar nd/inbox-file "~/org/inbox.org"
   "The one capture target. Everything is routed out of it at review
 time rather than filed into a context at capture time.")
@@ -1099,7 +1146,7 @@ time rather than filed into a context at capture time.")
 (defun nd/action-to-inbox ()
   "File current line, heading, or region as a TODO into `nd/inbox-file'.
 Adds a Backlink to the enclosing org entry (one level above, if the
-cursor is already on a heading) so the TODO retains its context."
+cursor is already on a heading), preferring the enclosing meeting."
   (interactive)
   (when (and (save-excursion (beginning-of-line) (org-at-heading-p))
              (org-get-todo-state))
@@ -1118,22 +1165,21 @@ cursor is already on a heading) so the TODO retains its context."
                   (replace-regexp-in-string
                    "^[ \t]*[-+*][ \t]*" "" raw)))
          (inbox (expand-file-name nd/inbox-file))
-         (src-pos (save-excursion
-                    (org-back-to-heading t)
-                    (when on-heading (org-up-heading-safe))
-                    ;; Keep walking up to find the entry heading:
-                    ;; either tagged with a company tag, or at journal
-                    ;; entry level (<= 2). Stops at whichever comes first.
-                    (while (and (not (seq-intersection
-                                      (org-get-tags)
-                                      '("sigtuna" "veltric" "nordic" "@home")))
-                                (> (org-current-level) 2)
-                                (org-up-heading-safe)))
-                    (point)))
-         (src-title (save-excursion
+         (src-pos (or (nd/org-meeting-heading)
+                      (save-excursion
+                        (org-back-to-heading t)
+                        (when on-heading (org-up-heading-safe))
+                        ;; Non-meeting entries retain their existing context.
+                        (while (and (not (seq-intersection
+                                          (org-get-tags)
+                                          '("sigtuna" "veltric" "nordic" "@home")))
+                                    (> (org-current-level) 2)
+                                    (org-up-heading-safe)))
+                        (point))))
+         (src-title (org-with-wide-buffer
                       (goto-char src-pos)
                       (org-get-heading t t t t)))
-         (src-id (save-excursion
+         (src-id (org-with-wide-buffer
                    (goto-char src-pos)
                    (org-id-get-create)))
          (ts (format-time-string "[%Y-%m-%d %a %H:%M]")))
@@ -1458,15 +1504,16 @@ missing records as choices so editing another selection cannot drop them."
                                   (car choices) nil t (cdr choices))))
     (or (cdr (assoc choice (car choices))) "")))
 
-(defun nd/read-contact-context ()
-  "Read a lowercase context, suggesting both existing and usual values."
+(defun nd/read-contact-context (&optional current)
+  "Edit CURRENT context, suggesting existing and usual values."
   (downcase
    (string-trim
     (completing-read "Context (optional): "
                      (delete-dups
                       (append '("sigtuna" "private" "veltric" "nordic")
                               (mapcar (lambda (entry) (plist-get entry :context))
-                                      (nd/contact-records)))))
+                                      (nd/contact-records))))
+                     nil nil current)
     "[: \t]+" "[: \t]+")))
 
 (defun nd/read-attendees (&optional current)
@@ -1535,7 +1582,7 @@ missing records as choices so editing another selection cannot drop them."
   (tabulated-list-print t))
 
 (define-derived-mode nd/contacts-mode tabulated-list-mode "Contacts"
-  "Contact directory. RET opens a person; h shows references; / filters context."
+  "Contact directory. RET opens a person; e edits details; h shows references."
   (setq tabulated-list-format [("Name" 26 t) ("Position" 26 t) ("Unit" 30 t)
                                ("Context" 10 t) ("Email" 25 t) ("Phone" 18 t)
                                ("Aliases" 20 t)]
@@ -1553,7 +1600,7 @@ missing records as choices so editing another selection cannot drop them."
           mode-line-process (list (concat ": " (or title "All contacts"))))
     (nd/contacts-refresh)
     (pop-to-buffer-same-window (current-buffer))
-    (message "RET person · h history · / context · o unit · a all · g refresh")))
+    (message "RET person · e details · h history · / context · o unit · a all · g refresh")))
 
 (defun nd/contacts-filter-context ()
   "Filter this directory by context, keeping its selected organization."
@@ -1626,6 +1673,26 @@ missing records as choices so editing another selection cannot drop them."
     (pop-to-buffer-same-window view)
     view))
 
+(defun nd/contact-edit-details (&optional field)
+  "Edit one FIELD of the selected contact, directory entry or person view."
+  (interactive)
+  (let ((id (nd/contact-read-id)))
+    (with-current-buffer (find-file-noselect (nd/contact-file nil))
+      (org-with-wide-buffer
+       (goto-char (or (org-find-entry-with-id id) (user-error "Contact not found")))
+       (let* ((fields '(("Context" . "CONTEXT") ("Organisation" . "ORG_UNIT")
+                        ("Position" . "POSITION") ("Email" . "EMAIL")
+                        ("Mobile" . "TEL_MOBILE") ("Aliases" . "ALIASES")))
+              (field (or field (completing-read "Contact detail: " fields nil t)))
+              (property (or (cdr (assoc field fields)) (user-error "Unknown contact detail: %s" field)))
+              (current (org-entry-get nil property))
+              (value (pcase field
+                       ("Context" (nd/read-contact-context current))
+                       ("Organisation" (nd/read-organizational-unit current))
+                       (_ (string-trim (read-string (concat field ": ") current))))))
+         (org-entry-put nil property value))))
+    (when (derived-mode-p 'nd/contacts-mode) (nd/contacts-refresh))))
+
 (defun nd/contact-history (&optional id)
   "Find exact links to person ID in Org files and archives.
 This is reference history, not a claim that every mention is attendance.
@@ -1668,14 +1735,16 @@ Search uses saved files; plain-text names cannot establish identity."
         (view-mode 1))
       (pop-to-buffer-same-window (current-buffer)))))
 
-(dolist (binding '(("RET" . nd/contact-open) ("h" . nd/contact-history)
+(dolist (binding '(("RET" . nd/contact-open) ("e" . nd/contact-edit-details)
+                   ("h" . nd/contact-history)
                    ("/" . nd/contacts-filter-context) ("o" . nd/list-contacts-by-org-unit)
                    ("a" . nd/contacts) ("g" . revert-buffer) ("q" . quit-window)))
   (define-key nd/contacts-mode-map (kbd (car binding)) (cdr binding)))
 
 (with-eval-after-load 'evil
   (evil-set-initial-state 'nd/contacts-mode 'normal)
-  (dolist (binding '(("RET" . nd/contact-open) ("h" . nd/contact-history)
+  (dolist (binding '(("RET" . nd/contact-open) ("e" . nd/contact-edit-details)
+                     ("h" . nd/contact-history)
                      ("/" . nd/contacts-filter-context) ("o" . nd/list-contacts-by-org-unit)
                      ("a" . nd/contacts) ("g" . revert-buffer) ("q" . quit-window)))
     (evil-define-key 'normal nd/contacts-mode-map (kbd (car binding)) (cdr binding))))
@@ -1697,7 +1766,7 @@ be filtered to."
 (with-eval-after-load 'org
   (setq org-capture-templates
         `(("i" "Inbox — clarify later" entry (file ,nd/inbox-file)
-           "* %? %(nd/read-tags)\n%U\n%a")
+           "* %?\n%U\n%a")
 
           ("p" "Project")
           ("ps" "Sigtuna" entry (file "~/org/gtd/sigtuna.org")
@@ -1710,11 +1779,7 @@ be filtered to."
            ,(nd/project-template "@home"))
 
           ("n" "Note" plain
-           (file (lambda ()
-                   (let ((title (read-string "Title: ")))
-                     (setq nd/capture-default-title title)
-                     (expand-file-name (concat (nd/note-slug title) ".org")
-                                       (nd/notes-directory)))))
+           (file nd/note-capture-file)
            ":PROPERTIES:\n:ID:       %(org-id-new)\n:END:\n#+TITLE: %(progn nd/capture-default-title)\n#+AUTHOR: %n\n#+DATE: %u\n\n%?"
            :unnarrowed t)
 
@@ -1722,13 +1787,14 @@ be filtered to."
            (file (lambda ()
                    (let* ((default-directory (nd/notes-directory))
                           (path (read-file-name "New org file: " default-directory)))
-                     (if (string-suffix-p ".org" path) path (concat path ".org")))))
-           ":PROPERTIES:\n:ID:       %(org-id-new)\n:END:\n#+TITLE: %^{Title}\n#+AUTHOR: %n\n#+DATE: %u\n\n%?"
+                     (nd/unique-note-file
+                      (if (string-suffix-p ".org" path) path (concat path ".org"))))))
+           ":PROPERTIES:\n:ID:       %(org-id-new)\n:END:\n#+TITLE: %(nd/read-note-title)\n#+AUTHOR: %n\n#+DATE: %u\n\n%?"
            :unnarrowed t)
 
           ("c" "Contact" entry
            (file+function ,(nd/contact-file nil) nd/contact-find-location)
-           "* %(progn nd/capture-contact-name)\n:PROPERTIES:\n:ID:         %(org-id-new)\n:ALIASES:\n:CONTEXT:    %(nd/read-contact-context)\n:ORG_UNIT:   %(nd/read-organizational-unit)\n:POSITION:   %^{Position}\n:EMAIL:      %^{Email}\n:TEL_MOBILE: %^{Mobile}\n:END:\n%?"
+           "* %(progn nd/capture-contact-name)\n:PROPERTIES:\n:ID:         %(org-id-new)\n:ALIASES:\n:CONTEXT:\n:ORG_UNIT:\n:POSITION:\n:EMAIL:\n:TEL_MOBILE:\n:END:\n%?"
            :empty-lines 1
            :insert-here t)
 
@@ -1782,7 +1848,6 @@ be filtered to."
   (visual-fill-column-mode 1))
 
 (add-hook 'org-mode-hook #'nd/org-mode-visual-fill)
-(add-hook 'org-mode-hook #'auto-save-visited-mode)
 
 (use-package org-download
   :ensure nil
@@ -1797,6 +1862,19 @@ be filtered to."
 
 (with-eval-after-load 'org-attach
   (setq org-attach-id-dir "~/org/attachments/"))
+
+(defun nd/org-auto-save-p ()
+  "Whether the current buffer is a local Org file under `org-directory'."
+  (with-current-buffer (or (buffer-base-buffer) (current-buffer))
+    (and buffer-file-name
+         (derived-mode-p 'org-mode)
+         (not (file-remote-p buffer-file-name))
+         (file-in-directory-p buffer-file-name (expand-file-name org-directory)))))
+
+;; This mode is global; an Org hook would enable saving for every file.
+(remove-hook 'org-mode-hook #'auto-save-visited-mode)
+(setq auto-save-visited-predicate #'nd/org-auto-save-p)
+(auto-save-visited-mode 1)
 
 (require 'org-id)
 (require 'org-agenda)
@@ -1924,6 +2002,65 @@ be filtered to."
            (and (nd/org-local-project-p)
                 (member (org-get-todo-state) org-not-done-keywords)))))
 
+(defun nd/read-waiting-for (&optional current)
+  "Read one contact or free-text owner, retaining CURRENT ID links."
+  (let* ((candidates (nd/contact-candidates (nd/contact-records)))
+         (choices (nd/org-completion-with-current
+                   current
+                   (mapcar (lambda (pair)
+                             (cons (car pair)
+                                   (org-link-make-string
+                                    (concat "id:" (plist-get (cdr pair) :id))
+                                    (plist-get (cdr pair) :name)))) candidates)))
+         (name (string-trim
+                (completing-read "Waiting for (contact or name): "
+                                 (car choices) nil nil (cdr choices))))
+         (stored (cdr (assoc name (car choices))))
+         (entry (unless stored (nd/contact-resolve name candidates))))
+    (when (string-empty-p name) (user-error "Choose who you are waiting for"))
+    (or stored
+        (when entry (org-link-make-string (concat "id:" (plist-get entry :id))
+                                          (plist-get entry :name)))
+        name)))
+
+(defun nd/org-waiting-for ()
+  "Set a task to WAIT with an owner and scheduled follow-up.
+Works in Org and the agenda.  Prompts finish before any edits; the owner
+and date replace WAIT's usual free-form state-change note."
+  (interactive)
+  (let* ((agenda (derived-mode-p 'org-agenda-mode))
+         (marker (if agenda
+                     (or (org-get-at-bol 'org-hd-marker) (org-get-at-bol 'org-marker))
+                   (and (derived-mode-p 'org-mode) (point-marker)))))
+    (unless (and (markerp marker) (marker-buffer marker))
+      (user-error "Select an open task"))
+    (org-with-point-at marker
+      (org-with-wide-buffer
+       (org-back-to-heading t)
+       (when (or (nd/org-local-project-p)
+                 (not (member (org-get-todo-state) '(nil "TODO" "NEXT" "WAIT"))))
+         (user-error "Select an open task, not a project"))
+       (let* ((owner (nd/read-waiting-for (org-entry-get nil "WAITING_FOR")))
+              (scheduled (org-entry-get nil "SCHEDULED"))
+              (date (org-read-date nil nil nil "Follow up: "
+                                   (when scheduled (org-time-string-to-time scheduled)))))
+         (atomic-change-group
+           (let ((org-inhibit-logging t)
+                 (org-log-reschedule nil))
+             (org-entry-put nil "WAITING_FOR" owner)
+             (org-todo "WAIT")
+             (org-schedule nil date))))))
+    (when agenda (org-agenda-redo))))
+
+(defun nd/org-wait-prefix ()
+  "Show a waiting entry's owner and follow-up in agenda prefixes."
+  (let ((owner (org-entry-get nil "WAITING_FOR"))
+        (date (org-entry-get nil "SCHEDULED")))
+    (format "%s · %s | "
+            (if (and owner (not (string-empty-p owner)))
+                (org-link-display-format owner) "owner missing")
+            (if date (substring date 1 -1) "no follow-up"))))
+
 (defun nd/org-project-marker ()
   "Return a marker at the containing project, also from an agenda entry.
 Look outside any narrowing, without changing the source buffer's view."
@@ -1943,6 +2080,54 @@ Look outside any narrowing, without changing the source buffer's view."
           (unless (nd/org-local-project-p)
             (user-error "No containing heading tagged :project:"))
           (copy-marker (point)))))))
+
+(defun nd/org-project-summary-field (label)
+  "Find a LABEL line in this entry's prose, returning (POSITION . VALUE).
+Ignore child headings, drawers and literal examples."
+  (save-excursion
+    (org-back-to-heading t)
+    (let ((end (nd/org-next-heading)))
+      (forward-line)
+      (catch 'field
+        (while (re-search-forward (concat "^" (regexp-quote label) ":[ \t]*\\(.*\\)$") end t)
+          (let ((position (line-beginning-position))
+                (value (match-string-no-properties 1)))
+            (when (eq (org-element-type (org-element-at-point)) 'paragraph)
+              (throw 'field (cons position value)))))))))
+
+(defun nd/org-project-set-summary-field (label value)
+  "Set this entry's prose LABEL to VALUE, adding a missing line."
+  (save-excursion
+    (let ((field (nd/org-project-summary-field label)))
+      (if field
+          (progn (goto-char (car field))
+                 (delete-region (point) (line-end-position)))
+        (goto-char (nd/org-next-heading))
+        (unless (bolp) (insert "\n")))
+      (insert label ": " value)
+      (unless field (insert "\n")))))
+
+(defun nd/org-project-update ()
+  "Edit Nuläge and Återuppta on the containing project's resume card.
+Refresh Uppdaterad only when a summary changes or a missing field is added.
+Works from a child, an indirect view or an agenda entry."
+  (interactive)
+  (let ((agenda (derived-mode-p 'org-agenda-mode))
+        (marker (nd/org-project-marker)))
+    (org-with-point-at marker
+      (org-with-wide-buffer
+       (let* ((status (nd/org-project-summary-field "Nuläge"))
+              (resume (nd/org-project-summary-field "Återuppta"))
+              (new-status (read-string "Nuläge: " (cdr status)))
+              (new-resume (read-string "Återuppta: " (cdr resume))))
+         (unless (and status resume
+                      (equal new-status (cdr status)) (equal new-resume (cdr resume)))
+           (atomic-change-group
+             (nd/org-project-set-summary-field "Nuläge" new-status)
+             (nd/org-project-set-summary-field "Återuppta" new-resume)
+             (nd/org-project-set-summary-field
+              "Uppdaterad" (format-time-string (org-time-stamp-format t t))))))))
+    (when agenda (org-agenda-redo))))
 
 (defun nd/org-project-at-point ()
   "Read the containing project's (ID TITLE), also from an agenda entry."
@@ -2070,11 +2255,8 @@ remove unprocessed after reviewing decisions and filing actions."
       (user-error "Select a meeting or an entry inside it"))
     (org-with-point-at marker
       (org-with-wide-buffer
-       (org-back-to-heading t)
-       (while (and (not (member "meeting" (org-get-tags nil t)))
-                   (org-up-heading-safe)))
-       (unless (member "meeting" (org-get-tags nil t))
-         (user-error "No containing heading tagged :meeting:"))
+       (goto-char (or (nd/org-meeting-heading)
+                      (user-error "No containing heading tagged :meeting:")))
        (let ((field (or field (completing-read "Meeting detail: "
                                              '("Attendees" "Organisation" "Projects" "Tags")
                                              nil t))))
@@ -2162,6 +2344,15 @@ remove unprocessed after reviewing decisions and filing actions."
       (org-agenda-skip-deadline-prewarning-if-scheduled nil)
       (org-agenda-skip-function 'nd/org-skip-finished))))
 
+(defun nd/org-wait-block (&optional undated)
+  "Waiting tasks with owner and date; UNDATED limits to missing follow-ups."
+  `(todo "WAIT"
+         ((org-agenda-skip-function ',(if undated 'nd/org-skip-dated-wait
+                                       'nd/org-skip-finished))
+          (org-agenda-prefix-format '((todo . "  %-12:c%(nd/org-wait-prefix)")))
+          (org-agenda-overriding-header ,(if undated "WAIT without a follow-up date"
+                                          "Waiting — owner and follow-up")))))
+
 (defun nd/org-project-blocks ()
   '((tags "project/ACTIVE|REVIEW"
           ((org-agenda-overriding-header "Active projects")))
@@ -2188,12 +2379,8 @@ remove unprocessed after reviewing decisions and filing actions."
     (tags "project/ACTIVE|REVIEW"
           ((org-agenda-skip-function 'nd/org-skip-covered-project)
            (org-agenda-overriding-header "Active projects without NEXT or dated WAIT")))
-    (todo "WAIT"
-          ((org-agenda-skip-function 'nd/org-skip-dated-wait)
-           (org-agenda-overriding-header "WAIT without a follow-up date")))
-    (todo "WAIT"
-          ((org-agenda-skip-function 'nd/org-skip-finished)
-           (org-agenda-overriding-header "Waiting — check owner and follow-up")))
+    ,(nd/org-wait-block t)
+    ,(nd/org-wait-block)
     (alltodo ""
           ((org-agenda-skip-function 'nd/org-skip-unless-residual)
            (org-agenda-overriding-header "Open work under finished projects")))
@@ -2222,8 +2409,7 @@ remove unprocessed after reviewing decisions and filing actions."
   `(,key ,description
      (,(nd/org-calendar-block 14)
       ,(nd/org-next-block)
-      (todo "WAIT" ((org-agenda-skip-function 'nd/org-skip-finished)
-                    (org-agenda-overriding-header "Waiting")))
+      ,(nd/org-wait-block)
       ,@(nd/org-project-blocks))
      (,@(assq-delete-all 'org-agenda-tag-filter-preset
                          (copy-tree nd/org-work-view-options))
@@ -2240,7 +2426,7 @@ remove unprocessed after reviewing decisions and filing actions."
         ("P" "Project portfolio" ,(nd/org-project-blocks) ,nd/org-work-view-options)
         ("R" "Weekly review" ,(nd/org-review-blocks) ,nd/org-work-view-options)
         ("W" "Waiting"
-         ((todo "WAIT" ((org-agenda-skip-function 'nd/org-skip-finished))))
+         (,(nd/org-wait-block))
          ,nd/org-work-view-options)
         ,(nd/agenda-context "wo" "Work OVERVIEW (Sigtuna)" "sigtuna")
         ,(nd/agenda-context "ho" "Home OVERVIEW" "@home")
@@ -2392,6 +2578,31 @@ remove unprocessed after reviewing decisions and filing actions."
           (org-table-align))))
   )
 
+(defun my/search-org ()
+  "Full-text search across `org-directory' with ripgrep."
+  (interactive)
+  (require 'org)
+  (unless (executable-find "rg")
+    (user-error "Install ripgrep (included in the arcmac Home Manager module)"))
+  (consult-ripgrep (expand-file-name org-directory)))
+
+(defun nd/search-recoll ()
+  "Search an optional Recoll index, with setup guidance when unavailable."
+  (interactive)
+  (require 'consult-recoll)
+  (unless (executable-find consult-recoll-program)
+    (user-error "Install Recoll (pkgs.recoll), configure indexed folders, then run recollindex"))
+  ;; Probe the configured index without assuming its path. Respect custom
+  ;; CLI flags (e.g. -c) and RECOLL_CONFDIR, just like the actual search.
+  (let ((buffer (get-buffer-create "*recoll-check*")))
+    (with-current-buffer buffer (erase-buffer))
+    (unless (eq 0 (apply #'process-file consult-recoll-program nil buffer nil
+                         (append (when (listp consult-recoll-search-flags)
+                                   consult-recoll-search-flags)
+                                 '("-n" "1" "arcmac_index_probe"))))
+      (user-error "Recoll index unavailable: configure folders and run recollindex; see *recoll-check*")))
+  (call-interactively #'consult-recoll))
+
 (with-eval-after-load 'org
   (evil-define-key '(normal visual) org-mode-map
     (kbd "<leader>ma") #'nd/action-to-inbox
@@ -2404,6 +2615,8 @@ remove unprocessed after reviewing decisions and filing actions."
     (kbd "<leader>mdT") #'org-time-stamp-inactive
     ;; entry state and metadata
     (kbd "<leader>mt") #'org-todo
+    (kbd "<leader>mw") #'nd/org-waiting-for
+    (kbd "<leader>mU") #'nd/org-project-update
     (kbd "<leader>mp") #'org-priority
     (kbd "<leader>mq") #'org-set-tags-command
     (kbd "<leader>mr") #'org-refile
@@ -2443,6 +2656,8 @@ remove unprocessed after reviewing decisions and filing actions."
     (kbd "<leader>mds") #'org-agenda-schedule
     (kbd "<leader>mdd") #'org-agenda-deadline
     (kbd "<leader>mt") #'org-agenda-todo
+    (kbd "<leader>mw") #'nd/org-waiting-for
+    (kbd "<leader>mU") #'nd/org-project-update
     (kbd "<leader>mp") #'org-agenda-priority
     (kbd "<leader>mq") #'org-agenda-set-tags
     (kbd "<leader>mr") #'org-agenda-refile
@@ -2469,11 +2684,6 @@ remove unprocessed after reviewing decisions and filing actions."
     (kbd "SPC") nil
     ;; Displaced by that; see the note in this section.
     (kbd "g SPC") #'org-agenda-show))
-
-(defun my/search-org ()
-  "Full-text search across ~/org with ripgrep."
-  (interactive)
-  (consult-ripgrep "~/org/"))
 
 (defun my/find-in-notes ()
   "Find a file in `org-directory' (Doom's SPC n f)."
@@ -2505,13 +2715,14 @@ remove unprocessed after reviewing decisions and filing actions."
     (kbd "<leader>X") #'org-capture
     (kbd "<leader>nf") #'my/find-in-notes
     (kbd "<leader>n/") #'my/search-org
-    (kbd "<leader>nR") #'consult-recoll
+    (kbd "<leader>nR") #'nd/search-recoll
     (kbd "<leader>nd") #'nd/org-today
     (kbd "<leader>nn") #'nd/org-next
     (kbd "<leader>np") #'nd/org-projects
     (kbd "<leader>nr") #'nd/org-review
     (kbd "<leader>ncd") #'nd/contacts
     (kbd "<leader>ncp") #'nd/contact-open
+    (kbd "<leader>nce") #'nd/contact-edit-details
     (kbd "<leader>nco") #'nd/list-contacts-by-org-unit
     (kbd "<leader>nch") #'nd/contact-history
     (kbd "<leader>ncr") #'nd/contacts-check
