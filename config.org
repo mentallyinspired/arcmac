@@ -456,6 +456,9 @@ on [[https://rahuljuliato.com/posts/completions-buffer-is-now-enough][The Comple
 =completion-eager-display= / =completion-eager-update= and
 =minibuffer-visible-completions-up-down-map= are new in Emacs 31.
 
+=C-v= and =C-S-v= paste from the clipboard in minibuffer prompts,
+including URLs, filenames and completion fields. =C-y= also remains available.
+
 The stock =flex= style's =try-completion= merges candidates and types
 into the buffer on TAB — with an LSP that inserts long wrong guesses.
 =flex-noinsert= keeps flex's filtering and scoring but never inserts
@@ -483,7 +486,10 @@ STRING, TABLE, PRED and POINT are the usual `try-completion' args."
 
 (use-package minibuffer
   :ensure nil
-  :bind ( :map minibuffer-visible-completions-up-down-map
+  :bind ( :map minibuffer-local-map
+          ("C-v" . clipboard-yank)
+          ("C-S-v" . clipboard-yank)
+          :map minibuffer-visible-completions-up-down-map
           ("C-n" . minibuffer-next-completion)
           ("C-p" . minibuffer-previous-completion))
   :hook ((minibuffer-setup . cursor-intangible-mode)
@@ -597,6 +603,35 @@ Spacemacs-style leader: evil provides the leader key, the built-in
 which-key provides the labeled popup menu. Starter set only — grow it
 as habits transfer from Doom.
 
+=SPC f D= deletes the current file and closes its buffer after confirmation.
+The prompt names the file and warns about unsaved edits. It respects Emacs'
+=delete-by-moving-to-trash= setting. Use the source file when working in an
+indirect person, project or capture view.
+
+#+name: file-management
+#+begin_src emacs-lisp
+(defun nd/delete-current-file ()
+  "Confirm deletion of the current file, then close its buffer.
+Respect `delete-by-moving-to-trash'. Refuse indirect buffers."
+  (interactive)
+  (when (buffer-base-buffer)
+    (user-error "Open the source file to delete it"))
+  (let ((file buffer-file-name))
+    (unless (and file (or (file-exists-p file) (file-symlink-p file)))
+      (user-error "This buffer does not visit an existing file"))
+    (when (yes-or-no-p
+           (format "%s %s%s? "
+                   (if delete-by-moving-to-trash "Trash" "Delete")
+                   (abbreviate-file-name file)
+                   (if (buffer-modified-p) " and discard unsaved edits" "")))
+      ;; Keep the buffer and edits intact if deleting the file fails.
+      (delete-file file t)
+      (set-buffer-modified-p nil)
+      (kill-buffer (current-buffer))
+      (message "%s %s" (if delete-by-moving-to-trash "Trashed" "Deleted")
+               (abbreviate-file-name file)))))
+#+end_src
+
 #+begin_src emacs-lisp
 (defun my/find-config ()
   "Open this config's config.org."
@@ -636,6 +671,7 @@ as habits transfer from Doom.
     (kbd "<leader>fr") #'recentf-open
     (kbd "<leader>fs") #'save-buffer
     (kbd "<leader>fd") #'dired-jump
+    (kbd "<leader>fD") #'nd/delete-current-file
     (kbd "<leader>fp") #'my/find-config
     ;; buffers — mirrors Doom's SPC b, built-in/evil commands only
     (kbd "<leader>bb") #'switch-to-buffer
@@ -1399,11 +1435,15 @@ Capture and filing helpers. Contact selectors live in the next section.
 #+name: org-helpers
 #+begin_src emacs-lisp
 (defun nd/org-journal-find-location ()
-  "Open today's journal entry for capture without inserting a new heading."
-  (org-journal-new-entry t)
-  (unless (eq org-journal-file-type 'daily)
-    (org-narrow-to-subtree))
-  (goto-char (point-max)))
+  "Locate today's capture target without displaying the journal."
+  (require 'org-journal)
+  (let ((org-journal-find-file-fn
+         (lambda (file) (set-buffer (find-file-noselect file)))))
+    (org-journal-new-entry t))
+  (save-restriction
+    (unless (eq org-journal-file-type 'daily)
+      (org-narrow-to-subtree))
+    (goto-char (point-max))))
 
 
 (defvar nd/capture-contact-name nil
@@ -2166,6 +2206,10 @@ Search uses saved files; plain-text names cannot establish identity."
 
 ** Capture
 
+Capture opens in a temporary panel across the bottom third of the frame,
+keeping existing work windows visible above it. =C-c C-c= saves the capture;
+=C-c C-k= cancels it. Both close the panel and restore the previous layout.
+
 Inbox capture opens directly for writing. Contact capture asks only for
 a name, with a confirmation for an existing name. Add other contact
 details with =SPC n c e= from the person view, or =e= in the directory.
@@ -2204,6 +2248,16 @@ card above its existing detail. PLAN and HOLD remain available.
 
 #+name: org-capture
 #+begin_src emacs-lisp
+;; Cover both the template preview shown while prompting and the indirect
+;; editing buffer. This takes precedence over Org's default action, which
+;; deletes the other windows before splitting the frame in two.
+(add-to-list 'display-buffer-alist
+             '("\\`\\(?:CAPTURE-\\|\\*Capture\\*\\)"
+               (display-buffer-in-side-window)
+               (side . bottom)
+               (slot . 0)
+               (window-height . 0.33)))
+
 (defun nd/project-template (context)
   "Capture body for a new project in CONTEXT.
 Projects take their state from the second sequence in
@@ -2281,7 +2335,8 @@ be filtered to."
 ** Journal
 
 Yearly files in =~/org/journal/=; the jm/jw/ji capture templates file
-into today's entry via =nd/org-journal-find-location=.
+into today's entry via =nd/org-journal-find-location=. Opening the journal
+or starting an entry uses the selected window, including after =SPC w n=.
 
 #+begin_src emacs-lisp
 (use-package org-journal
@@ -2294,6 +2349,7 @@ into today's entry via =nd/org-journal-find-location=.
   :init
   ;; The upstream %Y%m%d default would create a second file for the year.
   (setq org-journal-dir "~/org/journal/"
+        org-journal-find-file-fn #'find-file
         org-journal-date-format "%A, %Y %B %d"
         org-journal-file-format "%Y.org"
         org-journal-file-type 'yearly
@@ -3288,7 +3344,7 @@ with the other =g= movement keys evil-collection puts there. Plain
     (kbd "<leader>np") #'nd/org-projects
     (kbd "<leader>nr") #'nd/org-review
     (kbd "<leader>ncd") #'nd/contacts
-    (kbd "<leader>ncp") #'nd/contact-open
+    (kbd "<leader>ncf") #'nd/contact-open
     (kbd "<leader>nce") #'nd/contact-edit-details
     (kbd "<leader>nco") #'nd/list-contacts-by-org-unit
     (kbd "<leader>nch") #'nd/contact-history

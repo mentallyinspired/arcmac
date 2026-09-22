@@ -309,7 +309,10 @@ STRING, TABLE, PRED and POINT are the usual `try-completion' args."
 
 (use-package minibuffer
   :ensure nil
-  :bind ( :map minibuffer-visible-completions-up-down-map
+  :bind ( :map minibuffer-local-map
+          ("C-v" . clipboard-yank)
+          ("C-S-v" . clipboard-yank)
+          :map minibuffer-visible-completions-up-down-map
           ("C-n" . minibuffer-next-completion)
           ("C-p" . minibuffer-previous-completion))
   :hook ((minibuffer-setup . cursor-intangible-mode)
@@ -387,6 +390,27 @@ STRING, TABLE, PRED and POINT are the usual `try-completion' args."
   (evil-define-key 'normal 'global
     (kbd "gD") #'xref-find-references))
 
+(defun nd/delete-current-file ()
+  "Confirm deletion of the current file, then close its buffer.
+Respect `delete-by-moving-to-trash'. Refuse indirect buffers."
+  (interactive)
+  (when (buffer-base-buffer)
+    (user-error "Open the source file to delete it"))
+  (let ((file buffer-file-name))
+    (unless (and file (or (file-exists-p file) (file-symlink-p file)))
+      (user-error "This buffer does not visit an existing file"))
+    (when (yes-or-no-p
+           (format "%s %s%s? "
+                   (if delete-by-moving-to-trash "Trash" "Delete")
+                   (abbreviate-file-name file)
+                   (if (buffer-modified-p) " and discard unsaved edits" "")))
+      ;; Keep the buffer and edits intact if deleting the file fails.
+      (delete-file file t)
+      (set-buffer-modified-p nil)
+      (kill-buffer (current-buffer))
+      (message "%s %s" (if delete-by-moving-to-trash "Trashed" "Deleted")
+               (abbreviate-file-name file)))))
+
 (defun my/find-config ()
   "Open this config's config.org."
   (interactive)
@@ -425,6 +449,7 @@ STRING, TABLE, PRED and POINT are the usual `try-completion' args."
     (kbd "<leader>fr") #'recentf-open
     (kbd "<leader>fs") #'save-buffer
     (kbd "<leader>fd") #'dired-jump
+    (kbd "<leader>fD") #'nd/delete-current-file
     (kbd "<leader>fp") #'my/find-config
     ;; buffers — mirrors Doom's SPC b, built-in/evil commands only
     (kbd "<leader>bb") #'switch-to-buffer
@@ -1016,11 +1041,15 @@ With WAIT, queue behind any current sync, for mail just sent."
       org-tags-column 0)
 
 (defun nd/org-journal-find-location ()
-  "Open today's journal entry for capture without inserting a new heading."
-  (org-journal-new-entry t)
-  (unless (eq org-journal-file-type 'daily)
-    (org-narrow-to-subtree))
-  (goto-char (point-max)))
+  "Locate today's capture target without displaying the journal."
+  (require 'org-journal)
+  (let ((org-journal-find-file-fn
+         (lambda (file) (set-buffer (find-file-noselect file)))))
+    (org-journal-new-entry t))
+  (save-restriction
+    (unless (eq org-journal-file-type 'daily)
+      (org-narrow-to-subtree))
+    (goto-char (point-max))))
 
 
 (defvar nd/capture-contact-name nil
@@ -1749,6 +1778,16 @@ Search uses saved files; plain-text names cannot establish identity."
                      ("a" . nd/contacts) ("g" . revert-buffer) ("q" . quit-window)))
     (evil-define-key 'normal nd/contacts-mode-map (kbd (car binding)) (cdr binding))))
 
+;; Cover both the template preview shown while prompting and the indirect
+;; editing buffer. This takes precedence over Org's default action, which
+;; deletes the other windows before splitting the frame in two.
+(add-to-list 'display-buffer-alist
+             '("\\`\\(?:CAPTURE-\\|\\*Capture\\*\\)"
+               (display-buffer-in-side-window)
+               (side . bottom)
+               (slot . 0)
+               (window-height . 0.33)))
+
 (defun nd/project-template (context)
   "Capture body for a new project in CONTEXT.
 Projects take their state from the second sequence in
@@ -1832,6 +1871,7 @@ be filtered to."
   :init
   ;; The upstream %Y%m%d default would create a second file for the year.
   (setq org-journal-dir "~/org/journal/"
+        org-journal-find-file-fn #'find-file
         org-journal-date-format "%A, %Y %B %d"
         org-journal-file-format "%Y.org"
         org-journal-file-type 'yearly
@@ -2721,7 +2761,7 @@ remove unprocessed after reviewing decisions and filing actions."
     (kbd "<leader>np") #'nd/org-projects
     (kbd "<leader>nr") #'nd/org-review
     (kbd "<leader>ncd") #'nd/contacts
-    (kbd "<leader>ncp") #'nd/contact-open
+    (kbd "<leader>ncf") #'nd/contact-open
     (kbd "<leader>nce") #'nd/contact-edit-details
     (kbd "<leader>nco") #'nd/list-contacts-by-org-unit
     (kbd "<leader>nch") #'nd/contact-history

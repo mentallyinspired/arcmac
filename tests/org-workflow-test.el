@@ -29,7 +29,7 @@
         (insert ";;; -*- lexical-binding: t; -*-\n" body)
         (eval-buffer)))))
 
-(dolist (name '("save-cleanup" "buffer-management" "org-workflow" "org-settings" "org-tags"
+(dolist (name '("save-cleanup" "file-management" "buffer-management" "org-workflow" "org-settings" "org-tags"
                "org-work-agenda" "org-helpers" "org-meeting-refile" "org-contacts" "org-capture"
                "org-auto-save"))
   (nd/test-load-block name))
@@ -82,6 +82,58 @@
              (when (and file (string-prefix-p org-directory file))
                (with-current-buffer base (set-buffer-modified-p nil))
                (kill-buffer buffer))))))))
+
+(ert-deftest nd/files-delete-confirms-and-preserves-edits-on-cancel-or-error ()
+  (dolist (action '(cancel fail delete))
+    (let* ((file (nd/test-file "delete-current-file.txt" "Saved text.\n"))
+           (buffer (find-file-noselect file))
+           (delete-by-moving-to-trash nil))
+      (unwind-protect
+          (with-current-buffer buffer
+            (goto-char (point-max))
+            (insert "Unsaved text.\n")
+            (cl-letf (((symbol-function 'yes-or-no-p)
+                       (lambda (prompt)
+                         (should (string-search file prompt))
+                         (should (string-search "discard unsaved edits" prompt))
+                         (not (eq action 'cancel)))))
+              (if (eq action 'fail)
+                  (cl-letf (((symbol-function 'delete-file)
+                             (lambda (&rest _) (signal 'file-error '("Deletion failed")))))
+                    (should-error (nd/delete-current-file) :type 'file-error))
+                (nd/delete-current-file)))
+            (if (eq action 'delete)
+                (progn
+                  (should-not (file-exists-p file))
+                  (should-not (buffer-live-p buffer)))
+              (should (buffer-live-p buffer))
+              (should (buffer-modified-p))
+              (should (string-search "Unsaved text." (buffer-string)))
+              (should (equal "Saved text.\n"
+                             (with-temp-buffer
+                               (insert-file-contents file)
+                               (buffer-string))))))
+        (when (buffer-live-p buffer)
+          (with-current-buffer buffer (set-buffer-modified-p nil))
+          (kill-buffer buffer))))))
+
+(ert-deftest nd/files-delete-refuses-nonfiles-and-indirect-views ()
+  (cl-letf (((symbol-function 'yes-or-no-p)
+             (lambda (&rest _) (ert-fail "Unexpected deletion prompt"))))
+    (with-temp-buffer
+      (should-error (nd/delete-current-file) :type 'user-error)
+      (setq buffer-file-name (expand-file-name "not-on-disk.txt" nd/test-root))
+      (should-error (nd/delete-current-file) :type 'user-error))
+    (let* ((file (nd/test-file "delete-indirect-source.txt" "Keep this file.\n"))
+           (base (find-file-noselect file))
+           (view (make-indirect-buffer base " *delete-file-view*" t)))
+      (unwind-protect
+          (with-current-buffer view
+            (should-error (nd/delete-current-file) :type 'user-error)
+            (should (file-exists-p file))
+            (should (buffer-live-p base)))
+        (kill-buffer view)
+        (kill-buffer base)))))
 
 (ert-deftest nd/contacts-read-without-moving-point-or-narrowing ()
   (nd/test-with-contacts
@@ -658,6 +710,64 @@
     (org-agenda-remove-restriction-lock t)))
 
 (defvar org-journal-time-format)
+
+(ert-deftest nd/capture-bottom-panel-preserves-and-restores-work-windows ()
+  (dolist (split '(split-window-right split-window-below))
+    (dolist (finish '(org-capture-finalize org-capture-kill))
+      (save-window-excursion
+        (delete-other-windows)
+        (let* ((source (generate-new-buffer " *capture-source*"))
+               (reference (generate-new-buffer " *capture-reference*"))
+               (file (nd/test-file "capture-layout.org" ""))
+               (org-capture-templates
+                `(("T" "Test" entry (file ,file) "* %^{Title}\n%?")))
+               (org-capture-after-finalize-hook nil)
+               capture)
+          (unwind-protect
+              (progn
+                (switch-to-buffer source)
+                (let* ((origin (selected-window))
+                       (neighbour (funcall split)))
+                  (set-window-buffer neighbour reference)
+                  (set-window-configuration (current-window-configuration))
+                  (let ((layout (current-window-configuration)))
+                    (cl-letf (((symbol-function 'completing-read)
+                               (lambda (&rest _)
+                                 ;; The preview must preserve the work windows too.
+                                 (should (eq 'bottom (window-parameter nil 'window-side)))
+                                 (should (eq source (window-buffer origin)))
+                                 (should (eq reference (window-buffer neighbour)))
+                                 "Panel capture")))
+                      (org-capture nil "T"))
+                    (setq capture (current-buffer))
+                    (should org-capture-mode)
+                    (should (buffer-base-buffer))
+                    (should (= 3 (length (window-list))))
+                    (should (eq 'bottom (window-parameter nil 'window-side)))
+                    (should (= (window-total-width)
+                               (window-total-width (frame-root-window))))
+                    (should (eq source (window-buffer origin)))
+                    (should (eq reference (window-buffer neighbour)))
+                    (dolist (window (list origin neighbour))
+                      (should (<= (nth 3 (window-edges window))
+                                  (nth 1 (window-edges)))))
+                    (insert "Text from the capture panel.")
+                    (funcall finish)
+                    (should-not (buffer-live-p capture))
+                    (should (compare-window-configurations
+                             layout (current-window-configuration)))
+                    (with-current-buffer (find-file-noselect file)
+                      (should (eq (not (null (string-search
+                                             "Text from the capture panel."
+                                             (buffer-string))))
+                                  (eq finish 'org-capture-finalize)))))))
+            (when (buffer-live-p capture)
+              (with-current-buffer capture (org-capture-kill)))
+            (kill-buffer source)
+            (kill-buffer reference)
+            (when-let* ((target (get-file-buffer file)))
+              (with-current-buffer target (set-buffer-modified-p nil))
+              (kill-buffer target))))))))
 
 (ert-deftest nd/capture-inbox-opens-without-prompts ()
   (save-window-excursion

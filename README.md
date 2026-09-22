@@ -92,6 +92,14 @@ the manual clone command and carries on).
 
 ## Editing workflow
 
+Use `C-v` or `C-Shift-v` to paste into input prompts, including URL fields.
+`SPC m l l` inserts a normal link; `SPC m l i` downloads a URL as an attachment
+and inserts its attachment link.
+
+`SPC f D` deletes the current file and closes its buffer after confirmation.
+The prompt identifies the file and any unsaved edits; deletion respects
+Emacs' `delete-by-moving-to-trash` setting.
+
 Edit `config.org`, tangle (`C-c C-v t` inside Emacs, or the command in the
 file header), commit `config.org` together with both `.el` files.
 `nix flake check` runs the tangle check, `nixfmt` formatting check, Org
@@ -134,6 +142,8 @@ local Org files inside `org-directory`, including edits through person
 and project views. Code and Org files elsewhere need explicit saving.
 
 Inbox capture opens directly for writing; add tags during review.
+Capture templates open in a temporary panel at the bottom, keeping existing
+windows visible. `C-c C-c` saves and `C-c C-k` cancels; both restore the layout.
 New note captures require a title and choose a free filename (`name.org`,
 `name-2.org`, etc.), preserving existing notes and unsaved file buffers.
 
@@ -179,7 +189,7 @@ The detailed working guide lives in `~/org/notes/org-work-system.org`.
 
 ## Contacts
 
-`SPC n c d` opens the contact directory, `SPC n c p` a focused person
+`SPC n c d` opens the contact directory, `SPC n c f` a focused person
 view, `SPC n c o` contacts in an organisation and its child units,
 `SPC n c h` the person's references in saved notes and archives, and
 `SPC n c r` contact details needing review.
