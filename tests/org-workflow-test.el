@@ -179,6 +179,40 @@
                (lambda (_prompt candidates &rest _) (caar candidates))))
       (should (equal "[[id:org-id][Example Org]]" (nd/read-organizational-unit))))))
 
+(ert-deftest nd/contacts-unit-completion-keeps-nested-matches-with-prefix-collisions ()
+  (nd/test-with-contacts
+    (with-current-buffer (find-file-noselect (nd/contact-file t))
+      (goto-char (point-max))
+      (insert "** DigIT\n:PROPERTIES:\n:ID: digit-id\n:UNIT_TYPE: team\n:ALIASES: IT\n:END:\n"
+              "* DigitalWorkforce\n:PROPERTIES:\n:ID: company-id\n:UNIT_TYPE: company\n:END:\n"
+              "* IT Services\n:PROPERTIES:\n:ID: services-id\n:UNIT_TYPE: company\n:END:\n"))
+    (let ((completion-styles '(partial-completion flex initials))
+          (completion-ignore-case t)
+          (label "Example Org / DigIT [IT]"))
+      (dolist (input '("digit" "it"))
+        (let ((prompts 0))
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (_prompt candidates &rest _)
+                       (cl-incf prompts)
+                       (let* ((matches (completion-all-completions
+                                        input candidates nil (length input)))
+                              ;; Completion lists end with a base-size integer.
+                              (labels (seq-take matches (safe-length matches))))
+                         (should (member label labels)))
+                       label))
+                    ((symbol-function 'read-string) (lambda (&rest _) "New child"))
+                    ((symbol-function 'nd/contacts)
+                     (lambda (ids title)
+                       (should (equal '("digit-id") ids))
+                       (should (equal label title)))))
+            (should (equal "[[id:digit-id][DigIT]]" (nd/read-organizational-unit)))
+            (nd/list-contacts-by-org-unit)
+            (with-current-buffer (find-file-noselect (nd/contact-file t))
+              (nd/department-find-location)
+              (should (equal "digit-id" (org-entry-get nil "ID")))))
+          (should (= 3 prompts))))
+      (should (equal '(partial-completion flex initials) completion-styles)))))
+
 (ert-deftest nd/contacts-context-normalization ()
   (nd/test-with-contacts
     (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) " :WORK: ")))
@@ -332,6 +366,192 @@
      (search-forward heading)
      (beginning-of-line)
      (funcall function))))
+
+(defmacro nd/test-with-navigation (&rest body)
+  "Run BODY in an overview-folded file with a deeply nested task."
+  (declare (indent 0) (debug t))
+  `(let* ((file (nd/test-file
+                "navigation/tasks.org"
+                (concat
+                 "#+startup: overview\n* ACTIVE Project :project:\nProject notes.\n"
+                 "** Phase\nPhase notes.\n*** NEXT Target task\n"
+                 ":PROPERTIES:\n:ID: navigation-task\n:END:\n"
+                 ":LOGBOOK:\nA task log.\n:END:\nTask notes.\n"
+                 "*** TODO Sibling task\nSibling notes.\n"
+                 "** Other phase\n*** TODO Other phase task\n"
+                 "* ACTIVE Other project :project:\n** TODO Other project task\n")))
+          (org-agenda-files (list file))
+          (org-id-locations (make-hash-table :test #'equal))
+          (org-id-files nil)
+          (org-inhibit-startup nil)
+          (base (find-file-noselect file)))
+     (org-id-add-location "navigation-task" file)
+     (unwind-protect
+         (save-window-excursion
+           (switch-to-buffer base)
+           (org-cycle-set-startup-visibility)
+           ,@body)
+       (with-current-buffer base (set-buffer-modified-p nil))
+       (kill-buffer base))))
+
+(defun nd/test-navigation-visibility ()
+  "Check the task's outline and notes are visible, with other bodies folded."
+  (dolist (text '("* ACTIVE Project" "** Phase" "*** NEXT Target task"
+                  "Task notes." "*** TODO Sibling task" "** Other phase"))
+    (save-excursion
+      (goto-char (point-min))
+      (search-forward text)
+      (should-not (org-invisible-p (1- (point))))))
+  (dolist (text '("Project notes." "Phase notes." ":ID: navigation-task"
+                  "A task log." "Sibling notes." "Other phase task"
+                  "Other project task"))
+    (save-excursion
+      (goto-char (point-min))
+      (search-forward text)
+      (should (org-invisible-p (1- (point)))))))
+
+(ert-deftest nd/navigation-agenda-and-links-reveal-task-outline-and-notes ()
+  (dolist (method '(agenda-switch agenda-goto id-link id-goto file-link))
+    (ert-info ((format "Navigation method: %s" method))
+      (nd/test-with-navigation
+        (let ((before (buffer-string)))
+          (save-excursion
+            (search-forward "Target task")
+            (should (org-invisible-p (point))))
+          (pcase method
+            ((or 'agenda-switch 'agenda-goto)
+             (nd/test-view "N")
+             (goto-char (point-min))
+             (search-forward "Target task")
+             (if (eq method 'agenda-switch) (org-agenda-switch-to) (org-agenda-goto)))
+            ('id-link
+             (switch-to-buffer "*scratch*")
+             (org-link-open-from-string "[[id:navigation-task]]"))
+            ('id-goto
+             (switch-to-buffer "*scratch*")
+             (org-id-goto "navigation-task"))
+            ('file-link
+             (switch-to-buffer "*scratch*")
+             (org-link-open-from-string (format "[[file:%s::*Target task]]" file))))
+          (should (eq base (current-buffer)))
+          (should (equal "Target task" (org-get-heading t t t t)))
+          (nd/test-navigation-visibility)
+          (should (equal before (buffer-string)))
+          (should-not (buffer-modified-p)))))))
+
+(ert-deftest nd/navigation-reveal-preserves-point-and-sparse-tree-behaviour ()
+  (nd/test-with-navigation
+    (search-forward "Task notes.")
+    (let ((position (point)))
+      (org-fold-show-context 'link-search)
+      (should (= position (point)))
+      (nd/test-navigation-visibility))
+    (org-cycle-set-startup-visibility)
+    (goto-char (point-min))
+    (search-forward "Target task")
+    (beginning-of-line)
+    (let ((org-fold-show-context-detail '((tags-tree . minimal))))
+      (org-fold-show-context 'tags-tree))
+    (should-not (org-invisible-p))
+    (save-excursion
+      (search-forward "Task notes.")
+      (should (org-invisible-p (point))))))
+
+(ert-deftest nd/navigation-links-into-drawers-keep-the-target-visible ()
+  (nd/test-with-navigation
+    (dolist (text '(":ID: navigation-task" "A task log."))
+      (org-cycle-set-startup-visibility)
+      (goto-char (point-min))
+      (search-forward text)
+      (let ((position (point)))
+        (org-fold-show-context 'link-search)
+        (should (= position (point)))
+        (should-not (org-invisible-p (1- (point))))))))
+
+(defmacro nd/test-with-project-portfolio (&rest body)
+  "Run BODY with projects and nested NEXT tasks in an isolated agenda."
+  (declare (indent 0) (debug t))
+  `(let* ((file
+           (nd/test-file
+            "portfolio/work.org"
+            (concat
+             "* ACTIVE Same project :project:\n:PROPERTIES:\n:ID: parent-project\n:END:\n"
+             "** Phase\n*** NEXT First action\n*** NEXT Future action\nSCHEDULED: <2099-01-01 Thu>\n"
+             "*** TODO Later action\n*** DONE Finished action\n"
+             "** Archive :ARCHIVE:\n*** NEXT Archived action\n"
+             "** COMMENT Ignored\n*** NEXT Commented action\n"
+             "** ACTIVE Same project :project:\n:PROPERTIES:\n:ID: nested-project\n:END:\n*** NEXT Nested action\n"
+             "* ACTIVE Empty project :project:\n"
+             "* PLAN Planned project :project:\n** NEXT Planned action\n"
+             "* HOLD Held project :project:\n** NEXT Held action\n"
+             "* COMPLETED Closed project :project:\n** NEXT Residual next\n"
+             "* Legacy project :project:\n** NEXT Legacy action\n"
+             "* NEXT Standalone action\n")))
+          (org-agenda-files (list file)))
+     (unwind-protect (save-window-excursion ,@body)
+       (dolist (buffer (buffer-list))
+         (when (and (buffer-live-p buffer)
+                    (equal file (buffer-file-name (or (buffer-base-buffer buffer) buffer))))
+           (with-current-buffer buffer (set-buffer-modified-p nil))
+           (kill-buffer buffer))))))
+
+(ert-deftest nd/projects-next-rows-group-by-project-and-retain-source-markers ()
+  (nd/test-with-project-portfolio
+    (let ((view (nd/test-view "P")))
+      (dolist (excluded '("Later action" "Finished action" "Archived action"
+                          "Commented action" "Standalone action"))
+        (should-not (string-search excluded view))))
+    (with-current-buffer org-agenda-buffer-name
+      (goto-char (point-min))
+      (let (owner owner-column tasks projects)
+        (while (not (eobp))
+          (let ((marker (org-get-at-bol 'org-hd-marker)))
+            (when marker
+              (let* ((column (save-excursion
+                               (goto-char (text-property-any
+                                           (point) (line-end-position) 'org-heading t))
+                               (current-column)))
+                     (projectp (org-with-point-at marker (nd/org-local-project-p))))
+                (if projectp
+                    (setq owner marker owner-column column projects (cons marker projects))
+                  (should (> column owner-column))
+                  (org-with-point-at marker
+                    (should (equal "NEXT" (org-get-todo-state)))
+                    (should (equal owner (nd/org-project-marker)))
+                    (push (org-get-heading t t t t) tasks))))))
+          (forward-line))
+        (should (= 7 (length projects)))
+        (should (equal (sort tasks #'string<)
+                       (sort '("First action" "Future action" "Nested action" "Planned action"
+                               "Held action" "Residual next" "Legacy action") #'string<)))))))
+
+(ert-deftest nd/projects-next-rows-support-navigation-editing-and-refresh ()
+  (nd/test-with-project-portfolio
+    (nd/test-view "P")
+    (with-current-buffer org-agenda-buffer-name
+      (goto-char (point-min))
+      (search-forward "Nested action")
+      (beginning-of-line)
+      (let ((marker (org-get-at-bol 'org-hd-marker))
+            (indent (current-indentation)))
+        (save-window-excursion
+          (org-agenda-switch-to)
+          (should (equal "Nested action" (org-get-heading t t t t))))
+        (save-window-excursion
+          (nd/org-open-project)
+          (should (equal "nested-project" nd/org-project-view-id)))
+        (org-agenda-schedule nil "2030-02-01")
+        (should (= indent (current-indentation)))
+        (should (equal marker (org-get-at-bol 'org-hd-marker)))
+        (org-with-point-at marker
+          (should (string-prefix-p "<2030-02-01" (org-entry-get nil "SCHEDULED"))))
+        (let ((org-inhibit-logging t)) (org-agenda-todo "DONE"))
+        (org-with-point-at marker (should (equal "DONE" (org-get-todo-state))))
+        (should (= indent (current-indentation)))
+        (org-agenda-redo)
+        (should-not (string-search "Nested action" (buffer-string)))
+        (should (string-search "Same project" (buffer-string)))
+        (should (string-search "Future action" (buffer-string)))))))
 
 (ert-deftest nd/work-next-availability ()
   (let ((view (nd/test-view "N")))

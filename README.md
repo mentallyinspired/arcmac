@@ -129,6 +129,16 @@ review. `SPC m M` shows a project's journal meetings from either Org or
 an agenda entry. The corresponding agenda keys are `D`, `N`, `P`, `R`
 and `W` (waiting); existing domain overview keys are retained.
 
+Agenda jumps and task links expand the path to the target, showing sibling
+headings and the task's notes while keeping drawers folded. The cursor stays
+on the target. Files with `#+startup: overview` still open in overview normally.
+
+The project portfolio lists every project's NEXT tasks indented beneath it,
+including future-scheduled tasks and tasks in held or finished projects.
+Archived and commented tasks stay hidden. Nested projects list their own
+tasks once. Task rows support the usual agenda navigation and editing;
+refresh with `g r` after changes to rebuild the list.
+
 `SPC m b` opens a reusable, project-only buffer from Org or an agenda
 entry. It shares edits with the original file but keeps its own folding
 and cursor position. `SPC b d` closes the view; the source file stays open.
@@ -206,10 +216,12 @@ share edits with `ref/people.org`. History matches exact ID links;
 save recent edits before searching.
 
 Headings supply display names; `ALIASES` supports alternative names in
-selection, and `ORG_UNIT` links to `ref/organizations.org`. Meeting capture
-removes duplicate selections of the same person and keeps unknown guests
-as text. Conflicting names or employers remain in `CONTACT_REVIEW` until
-confirmed. Refresh dashboard tables with `C-u C-c C-x C-u`.
+selection, and `ORG_UNIT` links to `ref/organizations.org`.
+Organization selectors search the full path and aliases, so typing a unit
+name finds it even when another organization's name starts with that text.
+Meeting capture removes duplicate selections of the same person and keeps
+unknown guests as text. Conflicting names or employers remain in
+`CONTACT_REVIEW` until confirmed. Refresh dashboard tables with `C-u C-c C-x C-u`.
 
 ## Search
 

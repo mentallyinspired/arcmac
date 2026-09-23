@@ -939,6 +939,24 @@ With WAIT, queue behind any current sync, for mail just sent."
   :config
   ;; File links and ID backlinks follow in the current window.
   (setf (alist-get 'file org-link-frame-setup) #'find-file)
+
+  (defun nd/org-reveal-navigation-context (show-context &optional context)
+    "Reveal a navigation target's outline and notes via SHOW-CONTEXT.
+ID links use a nil CONTEXT, file/fuzzy links use `link-search', and
+agenda jumps use `agenda'.  Other contexts keep their reveal settings."
+    (if (and (derived-mode-p 'org-mode)
+             (memq context '(nil agenda link-search)))
+        (let ((org-fold-show-context-detail 'tree))
+          (prog1 (funcall show-context context)
+            (unless (org-before-first-heading-p)
+              (save-excursion
+                (org-fold-show-entry 'hide-drawers)
+                ;; A link may explicitly target text inside a drawer.
+                (when (org-invisible-p)
+                  (org-fold-show-set-visibility 'local))))))
+      (funcall show-context context)))
+
+  (advice-add 'org-fold-show-context :around #'nd/org-reveal-navigation-context)
   (add-to-list 'org-modules 'org-habit t))
 
 ;; `project' marks the project heading and nothing else. Without this it
@@ -1089,7 +1107,8 @@ With WAIT, queue behind any current sync, for mail just sent."
 (defun nd/department-find-location ()
   "Prompt for a unit and its parent, then move to the parent heading."
   (setq nd/capture-organization-name (read-string "Unit name: "))
-  (let* ((roster (nd/all-organization-roster))
+  (let* ((completion-styles '(substring flex))
+         (roster (nd/all-organization-roster))
          (parent (completing-read "Parent organization or unit: "
                                   (mapcar #'car roster) nil t))
          (id (cdr (assoc parent roster))))
@@ -1521,7 +1540,9 @@ missing records as choices so editing another selection cannot drop them."
 
 (defun nd/read-organizational-unit (&optional current)
   "Select a unit ID link, initially CURRENT; empty input clears it."
-  (let* ((choices (nd/org-completion-with-current
+  ;; Prefix matches must not suppress matches inside unit paths or aliases.
+  (let* ((completion-styles '(substring flex))
+         (choices (nd/org-completion-with-current
                    current
                    (mapcar (lambda (pair)
                              (cons (car pair)
@@ -1645,7 +1666,8 @@ missing records as choices so editing another selection cannot drop them."
 (defun nd/list-contacts-by-org-unit ()
   "Open contacts belonging to a selected unit or any of its descendants."
   (interactive)
-  (let* ((roster (nd/all-organization-roster))
+  (let* ((completion-styles '(substring flex))
+         (roster (nd/all-organization-roster))
          (choice (completing-read "Organization or unit: " roster nil t)))
     (nd/contacts (nd/organization-subtree-ids (cdr (assoc choice roster))) choice)))
 
@@ -2393,8 +2415,55 @@ remove unprocessed after reviewing decisions and filing actions."
           (org-agenda-overriding-header ,(if undated "WAIT without a follow-up date"
                                           "Waiting — owner and follow-up")))))
 
-(defun nd/org-project-blocks ()
-  '((tags "project/ACTIVE|REVIEW"
+(defun nd/org-project-with-next (entry)
+  "Append indented NEXT rows to project agenda ENTRY.
+Each task retains Org's own markers and formatting for agenda commands.
+Include future and held work; nested projects own their tasks separately."
+  (let ((marker (get-text-property 0 'org-hd-marker entry)))
+    (if (not (and (markerp marker) (marker-buffer marker))) entry
+      (with-current-buffer (marker-buffer marker)
+        (org-with-wide-buffer
+         (goto-char marker)
+         (org-narrow-to-subtree)
+         (let* ((project (point))
+                (heading (or (text-property-any 0 (length entry) 'org-heading t entry) 0))
+                ;; Keep this prefix on each row so edits retain the indentation.
+                (org-prefix-format-compiled
+                 (list (car org-prefix-format-compiled)
+                       (make-string (+ 2 (string-width (substring entry 0 heading))) ?\s)))
+                (org-agenda-skip-function nil)
+                (org-agenda-skip-function-global nil)
+                (org-agenda-tags-todo-honor-ignore-options nil)
+                (org-tags-match-list-sublevels t)
+                (tasks (org-scan-tags
+                        'agenda
+                        (lambda (todo _tags _level)
+                          (and (equal todo "NEXT")
+                               (not (nd/org-local-project-p))
+                               (not (nd/org-hidden-entry-p))
+                               (= project (nd/org-project-marker))))
+                        t)))
+           (mapconcat #'identity
+                      (cons entry (mapcar #'org-agenda-highlight-todo tasks)) "\n")))))))
+
+(defun nd/org-project-next-view (match)
+  "Render projects matching MATCH with their NEXT tasks underneath."
+  ;; Expand after sorting projects, before Org inserts and finalizes the rows.
+  ;; This keeps groups together and lets normal filters and styling see tasks.
+  (let ((finalize (symbol-function 'org-agenda-finalize-entries)))
+    (cl-letf (((symbol-function 'org-agenda-finalize-entries)
+               (lambda (entries &optional type)
+                 (mapconcat #'nd/org-project-with-next
+                            (split-string (funcall finalize entries type) "\n" t)
+                            "\n"))))
+      (org-tags-view nil match))))
+
+(defun nd/org-project-blocks (&optional with-next)
+  "Return project lifecycle blocks, including task rows when WITH-NEXT."
+  (mapcar
+   (lambda (block)
+     (if with-next (cons 'nd/org-project-next-view (cdr block)) block))
+   '((tags "project/ACTIVE|REVIEW"
           ((org-agenda-overriding-header "Active projects")))
     (tags "project/PLAN|READY|BACKLOG"
           ((org-agenda-overriding-header "Planning and backlog")))
@@ -2404,7 +2473,7 @@ remove unprocessed after reviewing decisions and filing actions."
           ((org-agenda-overriding-header "Finished projects — reconcile, then archive")))
     (tags "project"
           ((org-agenda-skip-function 'nd/org-skip-valid-project)
-           (org-agenda-overriding-header "Projects needing a lifecycle state")))))
+           (org-agenda-overriding-header "Projects needing a lifecycle state"))))))
 
 (defun nd/org-review-blocks ()
   `(,(nd/org-calendar-block 14)
@@ -2463,7 +2532,7 @@ remove unprocessed after reviewing decisions and filing actions."
           ,(nd/org-next-block "-focus-project/NEXT"))
          ,nd/org-work-view-options)
         ("N" "Available NEXT actions" (,(nd/org-next-block)) ,nd/org-work-view-options)
-        ("P" "Project portfolio" ,(nd/org-project-blocks) ,nd/org-work-view-options)
+        ("P" "Project portfolio" ,(nd/org-project-blocks t) ,nd/org-work-view-options)
         ("R" "Weekly review" ,(nd/org-review-blocks) ,nd/org-work-view-options)
         ("W" "Waiting"
          (,(nd/org-wait-block))
